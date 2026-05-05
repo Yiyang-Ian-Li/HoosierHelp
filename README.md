@@ -1,142 +1,184 @@
 # 211-Agent
 
-Prototype agent framework for answering questions about social support resources
-from an HSDS-style database.
+Benchmark-oriented prototype for studying whether an LLM/tool-calling agent can
+find appropriate human-service resources from a prepared 211-style resource
+index.
 
-This first version is intentionally local and lightweight:
+The current code path is intentionally simple and reproducible:
 
-- SQLite database seeded from synthetic HSDS-style JSON
-- constrained `search_services` tool for resource retrieval
-- OpenAI-style LLM tool calling through OpenRouter or OpenAI
-- CLI for quick experiments
-- unit tests using Python's standard library
-
-## Quick Start
-
-Put your OpenRouter key in `.env`:
-
-```bash
-OPENROUTER_API_KEY="..."
-HSDS_AGENT_MODEL="openai/gpt-4.1-mini"
+```text
+user query
+  -> OpenAI tool interface exposes search_resources
+  -> model calls search_resources with county/city/need filters
+  -> local tool filters and ranks records from resource_index JSONL
+  -> tool result is returned to the model
+  -> optional LLM reranker reorders retrieved candidates
+  -> agent returns ranked resources
+  -> evaluator compares retrieved resource_ids with benchmark GT
 ```
 
-```bash
-uv run python -m hsds_agent.cli seed
-uv run python -m hsds_agent.cli ask "I need free food near Bloomington this week"
-uv run python -m hsds_agent.cli ask "Where can a Spanish-speaking senior get transportation near 47401?"
-uv run python -m unittest discover -s tests
+The Python package is named `agent211` because Python imports cannot start with
+a digit. The CLI command is `211agent`.
+
+The search tool is intentionally isolated in:
+
+```text
+agent211/tool.py
 ```
 
-By default, the SQLite database is created at `./data/hsds_agent.sqlite`.
+That file contains the model-facing tool description, OpenAI tool schema,
+argument parsing, and filtering. The tool behaves like a website filter form:
+non-empty structured fields filter results. `text_query` is accepted for future
+retriever experiments but is currently ignored by this filter-only tool.
 
-## LLM Providers
+## Data
 
-The agent uses an OpenAI-style chat completion API for every `ask` request.
-OpenRouter is the default provider, using `openai/gpt-4.1-mini` unless
-`HSDS_AGENT_MODEL` is set.
+The agent expects a benchmark-ready resource index:
 
-OpenAI:
-
-```bash
-export OPENAI_API_KEY="..."
-export HSDS_AGENT_MODEL="gpt-4.1-mini"
-uv run python -m hsds_agent.cli ask "Find free legal help for eviction near Bloomington" --provider openai
+```text
+data/indiana211/benchmark_curated/resource_index_curated.jsonl
 ```
 
-OpenRouter:
+Each JSONL row is one resource with:
+
+- `resource_id`
+- service, agency, and site names
+- benchmark categories and source subcategories
+- service area counties
+- address and contact information
+- eligibility, application process, fees, documents
+- `search_text`
+
+The curated cleaning notebook is:
+
+```text
+notebooks/indiana211_benchmark_cleaning.ipynb
+```
+
+## Ask One Query
+
+By default the CLI uses the OpenAI tool-calling interface. Configure one of:
 
 ```bash
 export OPENROUTER_API_KEY="..."
-export HSDS_AGENT_MODEL="openai/gpt-4.1-mini"
-uv run python -m hsds_agent.cli ask "Find food help near 47401 for a Spanish speaker"
+# or
+export OPENAI_API_KEY="..."
 ```
 
-Provider configuration:
+`.env` is loaded automatically from the repo root. To override the model:
 
-- `OPENAI_API_KEY`, `OPENAI_BASE_URL`
-- `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`
-- `HSDS_AGENT_MODEL`
-- optional OpenRouter headers: `OPENROUTER_HTTP_REFERER`,
-  `OPENROUTER_APP_TITLE`
+```bash
+AGENT211_MODEL="openai/gpt-4.1-mini"
+```
 
-## Pipeline
+```bash
+uv run 211agent ask "I need a food pantry in Marion County"
+```
+
+Show raw ranked results:
+
+```bash
+uv run 211agent ask "I need help with utility bills in Lake County" --json
+```
+
+Use the no-network heuristic baseline only for debugging:
+
+```bash
+uv run 211agent ask "I need help with utility bills in Lake County" --planner heuristic --json
+```
+
+Enable optional LLM reranking:
+
+```bash
+uv run 211agent ask "I need legal help with an eviction near Indianapolis" --rerank --json
+```
+
+## Evaluate A Benchmark
+
+Benchmark JSONL format:
+
+```json
+{
+  "query_id": "q001",
+  "user_query": "I need a food pantry in Marion County",
+  "primary_gt_resource_ids": ["in211-..."],
+  "acceptable_gt_resource_ids": ["in211-..."],
+  "hard_negative_resource_ids": ["in211-..."],
+  "difficulty": "A"
+}
+```
+
+Run evaluation:
+
+```bash
+uv run 211agent eval data/benchmarks/stage1_queries.jsonl --limit 10
+```
+
+With optional reranking:
+
+```bash
+uv run 211agent eval data/benchmarks/stage1_queries.jsonl --limit 10 --rerank
+```
+
+Metrics reported:
+
+- `recall_at_1`
+- `recall_at_3`
+- `recall_at_5`
+- `mrr`
+
+If your benchmark includes explicit normalized constraints and you want to test
+retrieval separately from query understanding, pass:
+
+```bash
+uv run 211agent eval data/benchmarks/stage1_queries.jsonl --use-constraints
+```
+
+Supported constraint keys:
+
+```json
+{
+  "constraints": {
+    "counties": ["MARION"],
+    "cities": ["Indianapolis"],
+    "benchmark_categories": ["Food"],
+    "subcategories": ["Food"]
+  }
+}
+```
+
+## Playground
+
+Open:
 
 ```text
-User question
-  -> send question + search_services tool schema to OpenAI-compatible LLM
-  -> LLM emits a search_services tool call with structured arguments
-  -> Python validates/normalizes tool arguments
-  -> Python queries/ranks HSDS-style records from SQLite
-  -> Python returns structured tool result to the LLM
-  -> LLM writes final answer using only the tool result
-  -> LLM asks a follow-up if location or other required constraints are missing
+notebooks/agent211_playground.ipynb
 ```
 
-## How The LLM Uses Tools
+It loads the curated resource index and exposes a small `ask("...")` helper for
+manual query testing. By default it uses the full Indiana 211 deduped CSV:
 
-The LLM never writes SQL and does not inspect the database schema directly.
-Instead, [agent.py](./hsds_agent/agent.py) exposes one OpenAI-style function
-tool:
-
-```text
-search_services({
-  query,
-  location,
-  radius_miles,
-  categories,
-  languages,
-  eligibility,
-  open_now,
-  limit
-})
+```python
+DATA_MODE = "full"
 ```
 
-The model decides the arguments. The Python agent executes the tool by building
-a `SearchRequest`, querying SQLite through [tools.py](./hsds_agent/tools.py),
-and returning JSON records with names, descriptions, location, phone, website,
-hours, eligibility, language, distance, and source fields. The model then writes
-the final user-facing answer from those records.
+Switch to the curated benchmark subset with:
 
-## Experiment Data
-
-The current fixture is [data/sample_hsds.json](./data/sample_hsds.json). It is
-synthetic HSDS-style data, hand-built to exercise common 211/social-support
-queries without using real referral data.
-
-It includes:
-
-- organizations
-- services
-- locations
-- service-at-location relationships
-- phones
-- schedules
-
-The services cover food, shelter, childcare, transportation, legal aid, mental
-health, and benefits navigation. The records intentionally include useful test
-constraints such as Spanish language support, senior eligibility, free/sliding
-scale fees, multiple ZIP codes, schedules, and distance ranking around
-Bloomington, Indiana.
-
-This data is for experiments only. Real deployments should ingest current HSDS
-exports from a publisher, keep source/freshness metadata, and make confirmation
-warnings visible in every answer.
-
-## Project Layout
-
-```text
-data/sample_hsds.json          Synthetic HSDS-style experiment data
-hsds_agent/database.py         SQLite schema, seeding, query helpers
-hsds_agent/llm.py              OpenAI-compatible LLM wrapper
-hsds_agent/tools.py            Agent-callable tools
-hsds_agent/agent.py            Workflow orchestration and response generation
-hsds_agent/cli.py              Command-line interface
-tests/test_agent.py            Regression tests
+```python
+DATA_MODE = "curated"
 ```
 
-## Notes
+## Entrypoints
 
-The sample data is synthetic. It is useful for experiments and evaluation
-fixtures, but not for real referrals. Real deployments should load current data
-from an HSDS publisher, preserve source metadata, and show freshness/confirmation
-warnings in the final answer.
+Both forms work:
+
+```bash
+uv run 211agent ask "I need food in Marion County"
+uv run python main.py ask "I need food in Marion County"
+```
+
+## Tests
+
+```bash
+uv run python -m unittest discover -s tests
+```

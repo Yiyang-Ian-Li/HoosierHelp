@@ -1,4 +1,4 @@
-from hsds_agent.cli import main
+from agent211.cli import main
 
 
 if __name__ == "__main__":
