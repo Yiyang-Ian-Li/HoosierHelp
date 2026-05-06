@@ -149,24 +149,21 @@ Supported constraint keys:
 
 ## Playground
 
-Open:
+Run:
 
-```text
-notebooks/agent211_playground.ipynb
+```bash
+python3 playground.py "I need a food pantry in South Bend"
 ```
 
-It loads the curated resource index and exposes a small `ask("...")` helper for
-manual query testing. By default it uses the full Indiana 211 deduped CSV:
+By default it uses the full Indiana 211 deduped CSV and the no-network heuristic
+planner. You can edit the variables at the top of `playground.py`, or pass flags:
 
-```python
-DATA_MODE = "full"
+```bash
+python3 playground.py --data curated --planner llm "I need help with utilities in Lake County"
 ```
 
-Switch to the curated benchmark subset with:
-
-```python
-DATA_MODE = "curated"
-```
+Use `--planner llm` only when you want to make a real OpenAI/OpenRouter tool
+calling request.
 
 ## Entrypoints
 

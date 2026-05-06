@@ -9,18 +9,22 @@ Search Indiana 211 resource records using structured filters.
 Each record is one service/resource offered by an agency at a site. Use filters
 the way a person would use a resource-directory search page:
 - counties: service areas, e.g. MARION, ALLEN, LAKE, STATEWIDE.
-- cities/states/zipcodes: physical site address fields, e.g. Indianapolis, IN, 46204.
+- cities/states/zipcodes: physical site address fields, e.g. South Bend, IN, 46601.
 - service_names/agency_names/site_names: text contained in those names.
 - benchmark_categories/taxonomy_categories: broad need categories.
-- subcategories/curated_subcategories: specific need types, usually the best category filter.
+- subcategories/curated_subcategories: specific need types, usually the best need filter.
 - eligibility/application/document/fee keywords: text that must appear in those fields.
 - contact_required/address_required: require contact or address fields to exist.
 - text_query: accepted for future retriever experiments, but ignored by this filter-only tool.
 
 Non-empty filters are applied conjunctively across fields. Multiple values in
-one field are alternatives. Use only filters that are supported by the user's
-request; leave uncertain filters empty and put the uncertain need words in
-text_query.
+one field are alternatives. Only fill filters directly supported by the user's
+request. Do not infer nearby cities, counties, zip codes, agencies, services, or
+eligibility rules that the user did not state.
+
+Use broad categories only for broad needs. For example, Food is a subcategory,
+not a benchmark_category. If the need wording is uncertain, leave category
+filters empty and keep the wording in text_query.
 """
 
 
@@ -83,33 +87,31 @@ def search_resources_tool_schema(index: ResourceIndex, limit: int) -> dict:
                         index.counties,
                         "Service-area counties in uppercase, such as MARION or ALLEN. Use county names here, not city names.",
                     ),
-                    "cities": _enum_array_schema(
-                        index.cities[:500],
-                        "Physical site cities, such as Indianapolis, Fort Wayne, Bloomington.",
+                    "cities": _array_schema(
+                        "Physical site city names, such as South Bend or Indianapolis. Only include cities explicitly named by the user; do not add nearby cities."
                     ),
                     "states": _enum_array_schema(
                         sorted({r.state for r in index.resources if r.state}),
                         "Physical site state abbreviations, usually IN but can include out-of-state/national offices.",
                     ),
-                    "zipcodes": _enum_array_schema(
-                        sorted({r.zipcode for r in index.resources if r.zipcode}),
-                        "Physical site ZIP codes as strings.",
+                    "zipcodes": _array_schema(
+                        "Physical site ZIP codes as strings. Only include ZIP codes explicitly named by the user."
                     ),
                     "benchmark_categories": _enum_array_schema(
                         index.benchmark_categories,
-                        "Broad need categories. Use when the need is broad or subcategory is uncertain.",
+                        "Broad need categories. Do not put specific needs like Food, Utilities, or Legal Services here.",
                     ),
                     "taxonomy_categories": _enum_array_schema(
                         index.benchmark_categories,
-                        "Original broad Indiana 211 categories. Values look like Basic Needs, Health Care, Consumer Services.",
+                        "Original broad Indiana 211 categories. Use the same broad values as benchmark_categories.",
                     ),
                     "subcategories": _enum_array_schema(
                         index.subcategories,
-                        "Specific Indiana 211 need types, e.g. Food, Utilities, Housing/Shelter, Legal Services.",
+                        "Specific Indiana 211 need types, e.g. Food, Utilities, Housing/Shelter, Legal Services. Prefer this over broad category when the need is specific.",
                     ),
                     "curated_subcategories": _enum_array_schema(
                         index.subcategories,
-                        "Specific benchmark need types. In full data mode these match subcategories.",
+                        "Specific benchmark need types. In full data mode these match subcategories. Prefer this over broad category when the need is specific.",
                     ),
                     "eligibility_keywords": _array_schema(
                         "Words or phrases that must appear in eligibility text, e.g. senior, veteran, children, resident."
