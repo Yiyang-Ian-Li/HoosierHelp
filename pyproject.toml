@@ -5,15 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "211-agent"
 version = "0.1.0"
-description = "Benchmark-oriented 211 resource search agent"
+description = "Resource search agent prototype"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "openai>=2.33.0",
 ]
-
-[project.scripts]
-211agent = "agent211.cli:main"
-
-[tool.setuptools.packages.find]
-include = ["agent211*"]
