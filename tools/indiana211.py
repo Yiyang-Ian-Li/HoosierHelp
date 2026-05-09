@@ -6,21 +6,94 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .curated_categories import (
+    service_categories_for_raw_subcategories,
+    validate_curated_category_coverage,
+)
+
 
 DEFAULT_RESOURCE_INDEX = Path("data/indiana211/indiana211_resources_raw_all_counties.json")
 DEFAULT_FULL_INDIANA_CSV = Path("data/indiana211/indiana211_resources_deduped.csv")
 
-TOOL_DESCRIPTION = """
-Search Indiana 211 resource records using structured filters.
+TOOL_DESCRIPTION = (
+    "Search Indiana 211 resources. Non-empty fields are AND filters; values "
+    "within one field are OR alternatives. Counties filter by service area and "
+    "also allow statewide resources; cities and ZIP codes only improve ranking. "
+    "Use optional tag filters only for explicit user requirements."
+)
 
-Each record is one service/resource offered by an agency at a site. Requested
-fields are filters: a record must match every non-empty field to be returned.
-Multiple values inside one field are alternatives.
+ELIGIBILITY_TAG_MEANINGS = {
+    "open": "resource appears open to the general public or has broad eligibility.",
+    "resident": "requires or emphasizes residence in a place or service area.",
+    "income": "has income, poverty, or low-income eligibility.",
+    "senior": "for older adults or people above a stated age.",
+    "children": "for children, youth, or households with children.",
+    "disability": "for people with disabilities or disability-related needs.",
+    "veteran": "for veterans, military members, or military families.",
+    "pregnant": "for pregnant people or pregnancy-related needs.",
+    "homeless": "for people experiencing homelessness or housing instability.",
+}
 
-Use only facts stated by the user. Do not infer nearby cities, counties, ZIP
-codes, agencies, services, eligibility rules, intake steps, documents, fees, or
-hours that the user did not state.
-"""
+SCHEDULE_TAG_MEANINGS = {
+    "weekdays": "available or scheduled Monday through Friday.",
+    "weekends": "available or scheduled Saturday/Sunday.",
+    "evening": "has evening hours or after-5pm availability.",
+    "24_hours": "available 24 hours or 24/7.",
+    "varies": "schedule varies or user should call/check for current hours.",
+}
+
+INTAKE_METHOD_MEANINGS = {
+    "call": "start by phone.",
+    "walk_in": "walk in without first applying online.",
+    "online": "start on a website, online form, or web portal.",
+    "appointment": "appointment or scheduled intake is needed.",
+    "email": "start or contact by email.",
+    "text": "start or contact by text message.",
+    "mail": "start or submit materials by postal mail.",
+}
+
+DOCUMENT_REQUIREMENT_MEANINGS = {
+    "none": "records indicate nothing is needed or no documents required.",
+    "varies": "documents vary or user must call/check.",
+    "photo_id": "photo ID or identification is needed.",
+    "proof_of_income": "income documentation, pay stubs, or similar proof is needed.",
+    "proof_of_address": "proof of address, residence, or current address is needed.",
+    "lease": "lease or rental agreement is needed.",
+    "insurance_card": "insurance card is needed.",
+    "social_security": "Social Security card/number/document is needed.",
+    "birth_certificate": "birth certificate is needed.",
+    "utility_bill": "utility bill is needed.",
+}
+
+FEE_OPTION_MEANINGS = {
+    "free": "no fee or free service is indicated.",
+    "sliding_scale": "fees vary by income or sliding scale.",
+    "varies": "cost varies or user should call/check.",
+    "insurance": "insurance, Medicaid, or Medicare may be accepted/required.",
+    "payment_required": "some fee, copay, cost, or payment is indicated.",
+}
+
+DERIVED_TAG_FIELDS = {
+    "eligibility_tags",
+    "schedule_tags",
+    "intake_methods",
+    "document_requirements",
+    "fee_options",
+}
+
+IGNORED_REQUEST_VALUES = {
+    "eligibility_tags": {"open"},
+    "schedule_tags": {"varies"},
+    "document_requirements": {"varies"},
+    "fee_options": {"varies"},
+}
+
+BROAD_AVAILABLE_VALUES = {
+    "eligibility_tags": {"open"},
+    "schedule_tags": {"varies"},
+    "document_requirements": {"none", "varies"},
+    "fee_options": {"free", "varies"},
+}
 
 
 @dataclass(frozen=True)
@@ -31,6 +104,7 @@ class Resource:
     site_name: str
     taxonomy_categories: tuple[str, ...]
     subcategories: tuple[str, ...]
+    service_categories: tuple[str, ...]
     service_area: tuple[str, ...]
     city: str
     state: str
@@ -55,8 +129,7 @@ class SearchRequest:
     counties: tuple[str, ...] = ()
     cities: tuple[str, ...] = ()
     zipcodes: tuple[str, ...] = ()
-    taxonomy_categories: tuple[str, ...] = ()
-    subcategories: tuple[str, ...] = ()
+    service_categories: tuple[str, ...] = ()
     eligibility_tags: tuple[str, ...] = ()
     schedule_tags: tuple[str, ...] = ()
     intake_methods: tuple[str, ...] = ()
@@ -82,6 +155,8 @@ class ResourceIndex:
             {category for r in resources for category in r.taxonomy_categories}
         )
         self.subcategories = sorted({subcategory for r in resources for subcategory in r.subcategories})
+        validate_curated_category_coverage(set(self.subcategories))
+        self.service_categories = sorted({category for r in resources for category in r.service_categories})
 
 
 def load_resource_index(path: Path | str = DEFAULT_RESOURCE_INDEX) -> ResourceIndex:
@@ -111,6 +186,9 @@ def load_indiana_csv(path: Path | str = DEFAULT_FULL_INDIANA_CSV) -> ResourceInd
                     site_name=_clean(row.get("site_name", "")),
                     taxonomy_categories=tuple(_split(row.get("taxonomy_categories", ""))),
                     subcategories=tuple(_split(row.get("subcategories", ""))),
+                    service_categories=service_categories_for_raw_subcategories(
+                        _split(row.get("subcategories", ""))
+                    ),
                     service_area=tuple(_split(row.get("counties_served", ""))),
                     city=_clean(row.get("city", "")),
                     state=_clean(row.get("state_province", "")),
@@ -142,21 +220,17 @@ def search_resources_tool_schema(index: ResourceIndex) -> dict:
             "type": "object",
             "properties": {
                 "counties": _array_schema(
-                    "Service-area counties in uppercase, such as MARION or ALLEN. Use county names here, not city names."
+                    "User county names in uppercase, such as MARION or ALLEN. Used against resource service_area."
                 ),
                 "cities": _array_schema(
-                    "Physical site city names, such as South Bend or Indianapolis. Only include cities explicitly named by the user."
+                    "User city names explicitly stated by the user. Ranking boost only."
                 ),
                 "zipcodes": _array_schema(
-                    "Physical site ZIP codes as strings. Only include ZIP codes explicitly named by the user."
+                    "User ZIP codes explicitly stated by the user. Ranking boost only."
                 ),
-                "taxonomy_categories": _enum_array_schema(
-                    index.taxonomy_categories,
-                    "Broad Indiana 211 taxonomy categories.",
-                ),
-                "subcategories": _enum_array_schema(
-                    index.subcategories,
-                    "Specific Indiana 211 service subcategories. Prefer this when the user's need is specific.",
+                "service_categories": _enum_array_schema(
+                    index.service_categories,
+                    "Service need categories. Choose the closest match to the user's main need."
                 ),
                 "eligibility_tags": _enum_array_schema(
                     [
@@ -170,15 +244,18 @@ def search_resources_tool_schema(index: ResourceIndex) -> dict:
                         "pregnant",
                         "homeless",
                     ],
-                    "Structured eligibility facts explicitly stated by the user.",
+                    "Eligibility requirements explicitly needed by the user. Do not add general user traits as filters unless required.\n"
+                    + _value_meanings(ELIGIBILITY_TAG_MEANINGS.keys(), ELIGIBILITY_TAG_MEANINGS),
                 ),
                 "schedule_tags": _enum_array_schema(
                     ["weekdays", "weekends", "evening", "24_hours", "varies"],
-                    "Structured schedule facts explicitly needed by the user.",
+                    "Schedule requirements explicitly needed by the user.\n"
+                    + _value_meanings(SCHEDULE_TAG_MEANINGS.keys(), SCHEDULE_TAG_MEANINGS),
                 ),
                 "intake_methods": _enum_array_schema(
                     ["call", "walk_in", "online", "appointment", "email", "text", "mail"],
-                    "How the user can or needs to start the application/intake process.",
+                    "Required intake/contact method. Do not filter on methods the user merely says they can use.\n"
+                    + _value_meanings(INTAKE_METHOD_MEANINGS.keys(), INTAKE_METHOD_MEANINGS),
                 ),
                 "document_requirements": _enum_array_schema(
                     [
@@ -193,20 +270,28 @@ def search_resources_tool_schema(index: ResourceIndex) -> dict:
                         "birth_certificate",
                         "utility_bill",
                     ],
-                    "Documents the user says they have, need, or cannot provide.",
+                    "Document constraints explicitly required by the user.\n"
+                    + _value_meanings(DOCUMENT_REQUIREMENT_MEANINGS.keys(), DOCUMENT_REQUIREMENT_MEANINGS),
                 ),
                 "fee_options": _enum_array_schema(
                     ["free", "sliding_scale", "varies", "insurance", "payment_required"],
-                    "Fee/payment constraints explicitly stated by the user.",
+                    "Fee/payment requirements explicitly stated by the user.\n"
+                    + _value_meanings(FEE_OPTION_MEANINGS.keys(), FEE_OPTION_MEANINGS),
                 ),
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "description": "Maximum resources to return, from 1 to 20. Choose based on how many options are useful.",
+                },
             },
-            "required": [],
+            "required": ["limit"],
             "additionalProperties": False,
         },
     }
 
 
-def execute_search_resources(index: ResourceIndex, args: dict, limit: int = 10) -> dict:
+def execute_search_resources(index: ResourceIndex, args: dict, limit: int | None = None) -> dict:
     request = request_from_tool_args(args, limit=limit)
     return search_resources_tool_result(search_resources(index, request))
 
@@ -214,19 +299,21 @@ def execute_search_resources(index: ResourceIndex, args: dict, limit: int = 10) 
 def search_resources(index: ResourceIndex, request: SearchRequest) -> list[SearchResult]:
     results = []
     for resource in index.resources:
-        matched = _matched_filters(resource, request)
-        if matched is None:
+        match = _match_resource(resource, request)
+        if match is None:
             continue
+        matched, score = match
         results.append(
             SearchResult(
                 resource=resource,
-                score=float(len(matched)),
+                score=score,
                 matched_filters=tuple(matched),
             )
         )
 
     results.sort(
         key=lambda result: (
+            -result.score,
             result.resource.service_name.lower(),
             result.resource.agency_name.lower(),
             result.resource.resource_id,
@@ -235,19 +322,19 @@ def search_resources(index: ResourceIndex, request: SearchRequest) -> list[Searc
     return results[: request.limit]
 
 
-def request_from_tool_args(args: dict, limit: int = 10) -> SearchRequest:
+def request_from_tool_args(args: dict, limit: int | None = None) -> SearchRequest:
+    requested_limit = _bounded_limit(args.get("limit"), fallback=limit)
     return SearchRequest(
         counties=_string_tuple(args.get("counties")),
         cities=_string_tuple(args.get("cities")),
         zipcodes=_string_tuple(args.get("zipcodes")),
-        taxonomy_categories=_string_tuple(args.get("taxonomy_categories")),
-        subcategories=_string_tuple(args.get("subcategories")),
+        service_categories=_string_tuple(args.get("service_categories")),
         eligibility_tags=_string_tuple(args.get("eligibility_tags")),
         schedule_tags=_string_tuple(args.get("schedule_tags")),
         intake_methods=_string_tuple(args.get("intake_methods")),
         document_requirements=_string_tuple(args.get("document_requirements")),
         fee_options=_string_tuple(args.get("fee_options")),
-        limit=limit,
+        limit=requested_limit,
     )
 
 
@@ -259,8 +346,7 @@ def search_resources_tool_result(results: list[SearchResult]) -> dict:
                 "service_name": result.resource.service_name,
                 "agency_name": result.resource.agency_name,
                 "site_name": result.resource.site_name,
-                "taxonomy_categories": result.resource.taxonomy_categories,
-                "subcategories": result.resource.subcategories,
+                "service_categories": result.resource.service_categories,
                 "service_area": result.resource.service_area,
                 "city": result.resource.city,
                 "state": result.resource.state,
@@ -285,13 +371,18 @@ def search_resources_tool_result(results: list[SearchResult]) -> dict:
     }
 
 
-def _matched_filters(resource: Resource, request: SearchRequest) -> list[str] | None:
-    checks = [
-        ("counties", request.counties, resource.service_area),
-        ("cities", request.cities, (resource.city,)),
-        ("zipcodes", request.zipcodes, (resource.zipcode,)),
-        ("taxonomy_categories", request.taxonomy_categories, resource.taxonomy_categories),
-        ("subcategories", request.subcategories, resource.subcategories),
+def _bounded_limit(value: object, fallback: int | None = None) -> int:
+    if fallback is None:
+        fallback = 10
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        limit = int(fallback)
+    return max(1, min(20, limit))
+
+
+def _match_resource(resource: Resource, request: SearchRequest) -> tuple[list[str], float] | None:
+    derived_checks = [
         ("eligibility_tags", request.eligibility_tags, resource.eligibility_tags),
         ("schedule_tags", request.schedule_tags, resource.schedule_tags),
         ("intake_methods", request.intake_methods, resource.intake_methods),
@@ -299,12 +390,60 @@ def _matched_filters(resource: Resource, request: SearchRequest) -> list[str] | 
         ("fee_options", request.fee_options, resource.fee_options),
     ]
     matched = []
-    for name, requested, available in checks:
-        if requested:
-            if not _exact_any(requested, available):
-                return None
+    score = 0.0
+    if request.counties:
+        if _exact_any(request.counties, resource.service_area):
+            matched.append("counties")
+            score += 2.0
+        elif _exact_any(("STATEWIDE", "ALL"), resource.service_area):
+            matched.append("statewide")
+            score += 0.5
+        else:
+            return None
+    if request.cities:
+        if _exact_any(request.cities, (resource.city,)):
+            matched.append("cities")
+            score += 1.0
+    if request.zipcodes:
+        if _exact_any(request.zipcodes, (resource.zipcode,)):
+            matched.append("zipcodes")
+            score += 1.0
+    if request.service_categories:
+        if not _exact_any(request.service_categories, resource.service_categories):
+            return None
+        matched.append("service_categories")
+        score += 1.0
+    for name, requested, available in derived_checks:
+        check = _match_derived_tag_field(name, requested, available)
+        if check is None:
+            return None
+        if check:
             matched.append(name)
-    return matched
+            score += 1.0
+    return matched, score
+
+
+def _match_derived_tag_field(name: str, requested: tuple[str, ...], available: tuple[str, ...]) -> bool | None:
+    requested = _remove_ignored_requested_values(name, requested)
+    if not requested:
+        return False
+    if not available:
+        return False
+    if _has_broad_available_value(name, available):
+        return True
+    if _exact_any(requested, available):
+        return True
+    return None
+
+
+def _remove_ignored_requested_values(name: str, requested: tuple[str, ...]) -> tuple[str, ...]:
+    ignored = IGNORED_REQUEST_VALUES.get(name, set())
+    return tuple(value for value in requested if value not in ignored)
+
+
+def _has_broad_available_value(name: str, available: tuple[str, ...]) -> bool:
+    broad = BROAD_AVAILABLE_VALUES.get(name, set())
+    return any(value in broad for value in available)
 
 
 def _resource_from_json(row: dict) -> Resource:
@@ -317,6 +456,10 @@ def _resource_from_json(row: dict) -> Resource:
         site_name=str(row.get("site_name", "")),
         taxonomy_categories=tuple(row.get("taxonomy_categories") or ()),
         subcategories=tuple(row.get("subcategories") or ()),
+        service_categories=tuple(
+            row.get("service_categories")
+            or service_categories_for_raw_subcategories(row.get("subcategories") or ())
+        ),
         service_area=tuple(row.get("service_area") or ()),
         city=str(location.get("city", "")),
         state=str(location.get("state", "")),
@@ -364,6 +507,7 @@ def _resource_from_raw_group(row: dict) -> Resource:
         site_name=_clean(row.get("site_name", "")),
         taxonomy_categories=tuple(row.get("_categories") or ()),
         subcategories=tuple(row.get("_subcategories") or ()),
+        service_categories=service_categories_for_raw_subcategories(row.get("_subcategories") or ()),
         service_area=tuple(row.get("_counties") or ()),
         city=_clean(row.get("city", "")),
         state=_clean(row.get("state_province", "")),
@@ -394,6 +538,12 @@ def _enum_array_schema(values: list[str], description: str) -> dict:
         "items": {"type": "string", "enum": values},
         "description": description,
     }
+
+
+def _value_meanings(values, meanings: dict[str, str]) -> str:
+    return "Candidate meanings: " + "; ".join(
+        f"{value} = {meanings[value]}" for value in values
+    )
 
 
 def _exact_any(requested: tuple[str, ...], available: tuple[str, ...]) -> bool:

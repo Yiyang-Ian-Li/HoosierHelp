@@ -29,8 +29,20 @@ data/indiana211/indiana211_resource_county_rows.csv
 data/indiana211/indiana211_counties.csv
 ```
 
-Generated benchmark data, curated benchmark pools, reports, and cleaning
-notebooks are intentionally removed.
+LLM simulated-user benchmark data lives under:
+
+```text
+data/benchmark/user_cards.json
+data/benchmark/ground_truth.json
+data/benchmark/dataset_report.md
+```
+
+Experiment outputs live outside `data/`:
+
+```text
+experiments/<timestamp>__agent-react__agentmodel-...__usermodel-...__n.../
+experiments/<run>/conversations/<user_id>.json
+```
 
 ## Code
 
@@ -41,6 +53,9 @@ main.py
 agent/agent.py
 agent/llm.py
 tools/indiana211.py
+eval/run_eval.py
+eval/analyze_run.py
+eval/build_benchmark_data.py
 ```
 
 `agent/agent.py` is a generic Responses API function-calling loop. It receives
@@ -50,6 +65,29 @@ function calls, appends `function_call_output`, and asks the model again.
 `tools/indiana211.py` keeps the Indiana 211 data loading, `search_resources`
 schema, argument parsing, and filtering logic together. Requested fields are
 filters: a resource must match every non-empty field to be returned.
+
+## LLM Simulated Eval
+
+Generate or refresh tau-bench-style hidden user cards and ground truth:
+
+```bash
+.venv/bin/python -m eval.build_benchmark_data --cases 200
+```
+
+Run an OpenAI evaluation with an LLM simulated user:
+
+```bash
+.venv/bin/python -m eval.run_eval --provider openai --model gpt-4.1-mini --users data/benchmark/user_cards.json --ground-truth data/benchmark/ground_truth.json --max-turns 8 --agent-type default --sim-user-model gpt-4.1-mini --jobs 8
+```
+
+Use `--agent-type react` to evaluate the ReAct variant, which asks the model to
+emit a `Thought:` line before `Answer:`.
+
+Analyze an existing run:
+
+```bash
+python3 -m eval.analyze_run experiments/<run-id>
+```
 
 ## Tests
 

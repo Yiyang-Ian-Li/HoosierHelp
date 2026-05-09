@@ -2,6 +2,7 @@
 *.sqlite
 *.json
 tests/
+experiments/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
