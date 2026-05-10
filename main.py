@@ -1,62 +1,46 @@
 from __future__ import annotations
 
-import json
-import os
-import time
+from argparse import Namespace
+from pathlib import Path
 
-from agent import Agent
-from agent.llm import load_dotenv, make_openai_client
-from tools.indiana211 import (
-    execute_search_resources,
-    load_indiana_csv,
-    search_resources_tool_schema,
-)
+from agent.llm import load_dotenv
+from eval.run_eval import run as run_eval
 
 
 CONFIG = {
-    "query": "I need a food pantry in Marion County.",
+    "provider": "openai",
     "index_path": "data/indiana211/indiana211_resources_deduped.csv",
-    "provider": "openai",  # "openai" or "openrouter"
-    "model": None,
-    "limit": 10,
+    "agent_type": "default",  # "default" or "react"
+    "agent_model": "gpt-4.1-mini",
+    "user_model": "gpt-4.1-mini",
+    "users": "data/benchmark/user_cards.json",
+    "ground_truth": "data/benchmark/ground_truth.json",
+    "output_dir": "experiments",
+    "limit_users": 0,
+    "max_turns": 8,
+    "jobs": 8,
 }
 
 
 def main() -> None:
     load_dotenv()
-    config = CONFIG
-    index = load_indiana_csv(config["index_path"])
-    model = config["model"] or os.getenv("AGENT_MODEL") or default_model(config["provider"])
-    client = make_openai_client(config["provider"])
+    run_eval(eval_args(CONFIG))
 
-    agent = Agent(
-        client=client,
-        model=model,
-        tools=[search_resources_tool_schema(index)],
-        tool_functions={
-            "search_resources": lambda args, limit: execute_search_resources(index, args, limit)
-        },
+
+def eval_args(config: dict) -> Namespace:
+    return Namespace(
+        provider=config["provider"],
+        agent_type=config["agent_type"],
+        agent_model=config["agent_model"],
+        user_model=config["user_model"],
+        index_path=Path(config["index_path"]),
+        users=Path(config["users"]),
+        ground_truth=Path(config["ground_truth"]),
+        output_dir=Path(config["output_dir"]),
+        limit_users=config["limit_users"],
+        max_turns=config["max_turns"],
+        jobs=config["jobs"],
     )
-
-    started = time.time()
-    response = agent.ask(config["query"], limit=config["limit"])
-    elapsed = time.time() - started
-
-    print(f"Loaded {len(index.resources)} resources")
-    print(f"Query: {config['query']}")
-    print(f"Finished in {elapsed:.1f}s")
-    print()
-    print(response["output_text"])
-    print()
-    print("Tool calls:")
-    for call in response["tool_calls"]:
-        print(json.dumps(call, ensure_ascii=False))
-
-
-def default_model(provider: str) -> str:
-    if provider == "openrouter":
-        return "openai/gpt-5"
-    return "gpt-5"
 
 
 if __name__ == "__main__":

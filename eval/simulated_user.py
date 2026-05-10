@@ -36,18 +36,18 @@ class LLMSimulatedUser:
     def opening(self) -> str:
         opening = self.card.get("opening", "").strip()
         if opening:
-            self.history.append({"role": "user", "content": opening})
+            self.history.append({"role": "assistant", "content": opening})
             return opening
         reply = self._call_user_model("Start the conversation with the 211 agent.")
-        self.history.append({"role": "user", "content": reply})
+        self.history.append({"role": "assistant", "content": reply})
         return reply
 
     def respond(self, agent_text: str) -> str | None:
-        self.history.append({"role": "assistant", "content": agent_text})
+        self.history.append({"role": "user", "content": agent_text})
         reply = self._call_user_model(agent_text)
         if not reply:
             return None
-        self.history.append({"role": "user", "content": reply})
+        self.history.append({"role": "assistant", "content": reply})
         return reply
 
     def _call_user_model(self, agent_text: str) -> str:

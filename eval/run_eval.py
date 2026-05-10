@@ -21,8 +21,8 @@ DEFAULT_USERS = Path("data/benchmark/user_cards.json")
 DEFAULT_GROUND_TRUTH = Path("data/benchmark/ground_truth.json")
 DEFAULT_OUTPUT_DIR = Path("experiments")
 
-def main() -> None:
-    args = parse_args()
+
+def run(args: argparse.Namespace) -> Path:
     load_dotenv()
     users = json.loads(args.users.read_text(encoding="utf-8"))
     ground_truth = {
@@ -68,13 +68,13 @@ def main() -> None:
     scores = [case["score"] for case in cases]
     summary = {
         "provider": args.provider,
-        "model": args.model,
+        "model": args.agent_model,
         "agent_type": args.agent_type,
-        "agent_model": args.model,
+        "agent_model": args.agent_model,
         "user_type": "llm",
-        "user_model": args.sim_user_model,
+        "user_model": args.user_model,
         "sim_user": "llm",
-        "sim_user_model": args.sim_user_model,
+        "sim_user_model": args.user_model,
         "jobs": args.jobs,
         "limit": "model_selected",
         "max_turns": args.max_turns,
@@ -91,18 +91,19 @@ def main() -> None:
     (output_dir / "report.md").write_text(render_report(summary), encoding="utf-8")
     print(f"Wrote {output_dir / 'summary.json'}")
     print(f"Wrote {output_dir / 'report.md'}")
+    return output_dir
 
 
 def run_case_for_card(args, index, tools: list[dict], card: dict, ground_truth: dict) -> dict:
     client = make_openai_client(args.provider)
     agent = Agent(
         client=client,
-        model=args.model,
+        model=args.agent_model,
         tools=tools,
         tool_functions={"search_resources": lambda tool_args, limit: execute_search_resources(index, tool_args)},
         instructions=agent_instructions(args.agent_type),
     )
-    simulated_user = LLMSimulatedUser(card, make_openai_client(args.provider), args.sim_user_model)
+    simulated_user = LLMSimulatedUser(card, make_openai_client(args.provider), args.user_model)
     return run_case(agent, simulated_user, card, ground_truth, args.max_turns)
 
 
@@ -198,16 +199,18 @@ def aggregate_token_usage(cases: list[dict]) -> dict:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run simulated-user evaluation.")
     parser.add_argument("--provider", default="openai", choices=["openai", "openrouter"])
-    parser.add_argument("--model", default=os.getenv("AGENT_MODEL", "gpt-4o-mini"))
-    parser.add_argument("--index-path", default="data/indiana211/indiana211_resources_deduped.csv")
+    parser.add_argument("--agent-model", default=os.getenv("AGENT_MODEL", "gpt-4.1-mini"))
+    parser.add_argument("--model", dest="agent_model")
+    parser.add_argument("--user-model", default=os.getenv("SIM_USER_MODEL", "gpt-4.1-mini"))
+    parser.add_argument("--sim-user-model", dest="user_model")
+    parser.add_argument("--index-path", type=Path, default=Path("data/indiana211/indiana211_resources_deduped.csv"))
     parser.add_argument("--users", type=Path, default=DEFAULT_USERS)
     parser.add_argument("--ground-truth", type=Path, default=DEFAULT_GROUND_TRUTH)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--limit-users", type=int, default=0)
     parser.add_argument("--max-turns", type=int, default=8)
     parser.add_argument("--agent-type", choices=["default", "react"], default="default")
-    parser.add_argument("--sim-user-model", default=os.getenv("SIM_USER_MODEL", "gpt-4.1-mini"))
-    parser.add_argument("--jobs", type=int, default=1)
+    parser.add_argument("--jobs", type=int, default=8)
     return parser.parse_args()
 
 
@@ -217,8 +220,8 @@ def experiment_name(args: argparse.Namespace, case_count: int) -> str:
         [
             timestamp,
             f"agent-{slug(args.agent_type)}",
-            f"agentmodel-{slug(args.model)}",
-            f"usermodel-{slug(args.sim_user_model)}",
+            f"agentmodel-{slug(args.agent_model)}",
+            f"usermodel-{slug(args.user_model)}",
             f"n{case_count}",
         ]
     )
@@ -290,4 +293,4 @@ def render_report(summary: dict) -> str:
 
 
 if __name__ == "__main__":
-    main()
+    run(parse_args())

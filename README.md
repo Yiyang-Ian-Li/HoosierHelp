@@ -2,10 +2,16 @@
 
 Local resource search agent for Indiana 211 data.
 
-Run it by editing `CONFIG` in `main.py`, then executing:
+Run evaluation by editing `CONFIG` in `main.py`, then executing:
 
 ```bash
 python3 main.py
+```
+
+For a single ad hoc query, edit `CONFIG` in `playground.py` and run:
+
+```bash
+python3 playground.py
 ```
 
 By default this uses the OpenAI Responses API:
@@ -77,11 +83,11 @@ Generate or refresh tau-bench-style hidden user cards and ground truth:
 Run an OpenAI evaluation with an LLM simulated user:
 
 ```bash
-.venv/bin/python -m eval.run_eval --provider openai --model gpt-4.1-mini --users data/benchmark/user_cards.json --ground-truth data/benchmark/ground_truth.json --max-turns 8 --agent-type default --sim-user-model gpt-4.1-mini --jobs 8
+python3 main.py
 ```
 
-Use `--agent-type react` to evaluate the ReAct variant, which asks the model to
-emit a `Thought:` line before `Answer:`.
+`main.py` is the eval entrypoint. Its `CONFIG` controls provider, agent
+type/model, user model, data paths, turn limit, and parallel jobs.
 
 Analyze an existing run:
 
