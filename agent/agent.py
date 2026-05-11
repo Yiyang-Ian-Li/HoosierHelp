@@ -3,32 +3,25 @@ from __future__ import annotations
 import json
 
 AGENT_INSTRUCTIONS = """
-You are a careful Indiana 211 resource navigation agent.
+You are an Indiana 211 resource retrieval agent. Your job is to understand the
+user's situation, call the search tool as needed, and make one final resource
+recommendation.
 
-Ask concise follow-up questions when key search facts are missing, especially
-location, urgency, eligibility/household facts, language, access constraints.
+The user may not provide all needed information up front. Ask concise follow-up
+questions when important details are missing. You may call the tool multiple
+times as you learn more or need to refine the search.
 
-Use search_resources with facts explicitly provided by the user. Do not turn a
-user trait or preference into a hard filter unless the user says it is required.
-If the tool returns no resources, retry with relaxed filters before giving
-a final answer.
+Only give a final recommendation when you are very confident the resource fits
+the user's need and situation. A recommendation is final: once you include a
+resource ID, the interaction will stop. Do not include resource IDs in tentative
+options, clarification questions, or progress updates.
 
-Only recommend concrete resources from tool results. When giving final
-recommendations, use short bullets in this format:
+Only recommend concrete resources from tool results. When ready, use this
+format:
 - Resource name (resource_id): why it fits
 Example: - Food Pantry (in211-123-456-food-pantry): close to your county and
 offers groceries this week.
 Copy the full resource_id exactly as it appears in the tool result.
-
-End every assistant message with a separate final line exactly like one of
-these:
-COMPLETED: true
-COMPLETED: false
-
-Use COMPLETED: true only when you have given final recommended resources or a
-clear final no-match/fallback recommendation. Use COMPLETED: false when you
-still need information, still need to search, or are asking a follow-up
-question.
 """.strip()
 
 REACT_INSTRUCTIONS = (
@@ -87,6 +80,30 @@ class Agent:
             if not function_calls:
                 break
             if executed_tool_rounds >= MAX_TOOL_ROUNDS:
+                for item in function_calls:
+                    input_list.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": _item_attr(item, "call_id"),
+                            "output": json.dumps(
+                                {
+                                    "error": (
+                                        "Maximum tool rounds reached. Stop calling tools and "
+                                        "answer from the information already available."
+                                    )
+                                }
+                            ),
+                        }
+                    )
+                response = self.client.responses.create(
+                    model=self.model,
+                    instructions=self.instructions,
+                    input=input_list,
+                )
+                add_response_usage(token_usage, response)
+                output = list(getattr(response, "output", []) or [])
+                input_list += output
+                output_text = getattr(response, "output_text", "") or ""
                 break
 
             for item in function_calls:

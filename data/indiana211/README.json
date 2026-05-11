@@ -1,0 +1,16 @@
+{
+  "source_page": "https://indiana211-resource.fssa.in.gov/",
+  "source_api_host": "https://in211-api.azurewebsites.net/api/HttpTrigger_in211api_dev",
+  "source_api_name": "blobresources",
+  "retrieved_date": "2026-05-05",
+  "county_count": 92,
+  "resource_county_row_count": 31358,
+  "deduped_resource_count": 9987,
+  "dedupe_rule": "Grouped by agency_id + site_id + service_name; taxonomy categories, subcategories, and counties are aggregated. Use indiana211_resource_county_rows.csv for the lossless row-level export.",
+  "files": [
+    "indiana211_resources_raw_all_counties.json",
+    "indiana211_resource_county_rows.csv",
+    "indiana211_resources_deduped.csv",
+    "indiana211_counties.csv"
+  ]
+}

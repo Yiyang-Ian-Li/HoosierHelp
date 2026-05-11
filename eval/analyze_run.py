@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import Counter
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from eval.metrics import aggregate, parse_tool_output, score_case
 
@@ -17,7 +20,13 @@ def main() -> None:
     ]
     cases = [json.loads(path.read_text(encoding="utf-8")) for path in case_paths]
     scores = [
-        score_case(case["card"], case["ground_truth"], case["transcript"], case["response"])
+        score_case(
+            case["card"],
+            case["ground_truth"],
+            case["transcript"],
+            case["response"],
+            case.get("user_satisfaction", {}),
+        )
         for case in cases
     ]
     details = analyze_cases(cases, scores)
@@ -29,6 +38,7 @@ def main() -> None:
         "agent_type",
         "agent_model",
         "user_type",
+        "user_set",
         "user_model",
         "limit",
         "turns",
@@ -39,9 +49,12 @@ def main() -> None:
         "sim_user_model",
         "jobs",
         "token_usage",
+        "simulated_user_diagnostics",
     ]
     summary = {
         **{key: old_summary[key] for key in passthrough_keys if key in old_summary},
+        "simulated_user_diagnostics": old_summary.get("simulated_user_diagnostics")
+        or aggregate_simulated_user_diagnostics(cases),
         "summary": aggregate(scores),
         "scores": scores,
         "analysis": details,
@@ -72,17 +85,17 @@ def analyze_cases(cases: list[dict], scores: list[dict]) -> dict:
     for case in cases:
         user_id = case["card"]["user_id"]
         score = score_by_user[user_id]
-        if not score["acceptable_hit"]:
-            if not score["retrieval_acceptable_hit"]:
+        if not score["ground_truth_hit"]:
+            if not score["retrieval_ground_truth_hit"]:
                 retrieval_misses.append(user_id)
             else:
                 retrieved_not_recommended.append(user_id)
                 recommended_ids = score.get("recommended_resource_ids", [])
-                acceptable_ids = case["ground_truth"].get("acceptable_gt_resource_ids", [])
+                ground_truth_ids = case["ground_truth"].get("ground_truth_resource_ids", [])
                 if any(
-                    acceptable_id.startswith(recommended_id) or recommended_id.startswith(acceptable_id)
+                    ground_truth_id.startswith(recommended_id) or recommended_id.startswith(ground_truth_id)
                     for recommended_id in recommended_ids
-                    for acceptable_id in acceptable_ids
+                    for ground_truth_id in ground_truth_ids
                 ):
                     possible_id_format.append(user_id)
         response = case["response"]
@@ -127,6 +140,16 @@ def analyze_cases(cases: list[dict], scores: list[dict]) -> dict:
     }
 
 
+def aggregate_simulated_user_diagnostics(cases: list[dict]) -> dict:
+    trait_counts = Counter()
+    for case in cases:
+        diagnostics = case.get("simulated_user_diagnostics") or {}
+        trait_counts.update(diagnostics.get("traits") or [])
+    return {
+        "trait_counts": dict(trait_counts),
+    }
+
+
 def render_report(summary: dict) -> str:
     agg = summary["summary"]
     analysis = summary["analysis"]
@@ -148,31 +171,23 @@ def render_report(summary: dict) -> str:
         "",
         "## Headline Metrics",
         "",
-        f"- Primary hit rate: {agg.get('primary_hit_rate', 0):.2%}",
-        f"- Acceptable hit rate: {agg.get('acceptable_hit_rate', 0):.2%}",
-        f"- Retrieval primary hit rate: {agg.get('retrieval_primary_hit_rate', 0):.2%}",
-        f"- Retrieval acceptable hit rate: {agg.get('retrieval_acceptable_hit_rate', 0):.2%}",
+        f"- Ground truth hit rate: {agg.get('ground_truth_hit_rate', 0):.2%}",
+        f"- Retrieval ground truth hit rate: {agg.get('retrieval_ground_truth_hit_rate', 0):.2%}",
         f"- Average tool calls per case: {agg.get('average_tool_calls', 0):.2f}",
-        f"- Average clarification score: {agg.get('average_clarification_score', 0):.2f}/4",
+        f"- Average satisfaction: {format_optional(agg.get('average_satisfaction'))}/5",
+        f"- Got relevant help rate: {format_optional_percent(agg.get('got_relevant_help_rate'))}",
+        f"- Average actionability: {format_optional(agg.get('average_actionability'))}/5",
+        f"- Multiple recommendation turns: {agg.get('multiple_recommendation_turn_rate', 0):.2%}",
+        f"- Recommended IDs not retrieved: {agg.get('recommended_ids_not_retrieved_rate', 0):.2%}",
         f"- Average total tokens per case: {summary.get('token_usage', {}).get('average_per_case', {}).get('total_tokens', 0):.0f}",
         f"- Cases with no tool call: {analysis['no_tool_case_count']}",
         f"- Empty tool output rate: {analysis['empty_tool_output_rate']:.2%}",
-        "",
-        "## By Difficulty",
-        "",
     ]
-    for difficulty, item in agg.get("by_difficulty", {}).items():
+    diagnostics = summary.get("simulated_user_diagnostics") or {}
+    if diagnostics:
         lines.extend(
             [
-                f"### {difficulty}",
-                "",
-                f"- Cases: {item['cases']}",
-                f"- Primary hit rate: {item['primary_hit_rate']:.2%}",
-                f"- Acceptable hit rate: {item['acceptable_hit_rate']:.2%}",
-                f"- Retrieval primary hit rate: {item['retrieval_primary_hit_rate']:.2%}",
-                f"- Retrieval acceptable hit rate: {item['retrieval_acceptable_hit_rate']:.2%}",
-                f"- Average clarification score: {item['average_clarification_score']:.2f}/4",
-                "",
+                f"- Trait counts: {diagnostics.get('trait_counts', {})}",
             ]
         )
     lines.extend(
@@ -184,7 +199,7 @@ def render_report(summary: dict) -> str:
             "Failure reason counts:",
             "",
             f"- Retrieval miss: {analysis['failure_counts']['retrieval_miss']}",
-            f"- Retrieved GT but did not recommend it or did not cite a full id: {analysis['failure_counts']['retrieved_but_not_recommended_or_id']}",
+            f"- Retrieved ground truth but did not recommend it or did not cite a full id: {analysis['failure_counts']['retrieved_but_not_recommended_or_id']}",
             f"- Likely id-format-only failures: {analysis['failure_counts']['possible_id_format']}",
             "",
             "Common non-empty filters in tool calls:",
@@ -207,18 +222,17 @@ def render_report(summary: dict) -> str:
             "",
             "## Interpretation",
             "",
-            "- The agent is relatively good at asking follow-up questions in conversation.",
+            "- User satisfaction is a simulated-user experience signal, not a replacement for ground-truth resource hits.",
             "- The agent often maps the user's need to a nearby but wrong service category or resource family.",
-            "- Exact resource-id citation remains fragile; shortened ids are not counted as correct.",
+            "- Final recommendation scoring uses the last agent recommendation with resource IDs before completion.",
             "- Low empty-output rate means failure is mostly semantic ranking and selection, not only no-result recovery.",
             "",
             "## Recommended Fixes",
             "",
             "1. Improve the model's category selection or add a semantic retrieval layer before structured filtering.",
-            "2. Require final answers to cite exact resource ids copied from tool results.",
-            "3. Track id-prefix matches as a diagnostic while keeping exact-id success strict.",
-            "4. Add trajectory-level failure labels so benchmark reports separate retrieval, ranking, final-answer, and user-simulation issues.",
-            "5. Keep LLM review in dataset construction for acceptable ground truth; pure category/name heuristics are too noisy.",
+            "2. Keep final recommendation ids exact and copied from tool results.",
+            "3. Add trajectory-level failure labels so benchmark reports separate retrieval, ranking, final-answer, and user-simulation issues.",
+            "4. Inspect user-card generation quality when failures cluster around a category or access constraint.",
             "",
         ]
     )
@@ -226,20 +240,32 @@ def render_report(summary: dict) -> str:
 
 
 def render_failure_paragraph(agg: dict, analysis: dict) -> str:
-    retrieval_rate = agg.get("retrieval_acceptable_hit_rate", 0)
+    retrieval_rate = agg.get("retrieval_ground_truth_hit_rate", 0)
     empty_rate = analysis["empty_tool_output_rate"]
     if empty_rate > 0.1:
         return (
-            "The run asked useful clarification questions, but retrieval remained weak "
-            f"({retrieval_rate:.2%} retrieval acceptable hit rate). A substantial number of tool calls "
+            "Retrieval remained weak "
+            f"({retrieval_rate:.2%} retrieval ground truth hit rate). A substantial number of tool calls "
             f"returned no resources ({empty_rate:.2%} empty output rate), so no-result recovery should be inspected."
         )
     return (
-        "The run asked useful clarification questions, and empty tool outputs were rare "
-        f"({empty_rate:.2%}). Retrieval remained weak ({retrieval_rate:.2%} retrieval acceptable hit rate) "
+        "Empty tool outputs were rare "
+        f"({empty_rate:.2%}). Retrieval remained weak ({retrieval_rate:.2%} retrieval ground truth hit rate) "
         "because the agent often chose a nearby but wrong service category/resource family, or retrieved the "
-        "right resource but failed to cite the exact id in the final answer."
+        "right resource but failed to include the exact id in the completed final recommendation."
     )
+
+
+def format_optional(value) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.2f}"
+
+
+def format_optional_percent(value) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.2%}"
 
 
 def parse_args() -> argparse.Namespace:

@@ -4,6 +4,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -18,17 +19,13 @@ from tools.indiana211 import execute_search_resources, load_indiana_csv, search_
 
 
 DEFAULT_USERS = Path("data/benchmark/user_cards.json")
-DEFAULT_GROUND_TRUTH = Path("data/benchmark/ground_truth.json")
 DEFAULT_OUTPUT_DIR = Path("experiments")
 
 
 def run(args: argparse.Namespace) -> Path:
     load_dotenv()
     users = json.loads(args.users.read_text(encoding="utf-8"))
-    ground_truth = {
-        item["user_id"]: item
-        for item in json.loads(args.ground_truth.read_text(encoding="utf-8"))
-    }
+    ground_truth_by_case = load_ground_truth_from_cards(users)
     if args.limit_users:
         users = users[: args.limit_users]
     index = load_indiana_csv(args.index_path)
@@ -39,19 +36,38 @@ def run(args: argparse.Namespace) -> Path:
     conversations_dir = output_dir / "conversations"
     output_dir.mkdir(parents=True, exist_ok=True)
     conversations_dir.mkdir(parents=True, exist_ok=True)
+    print(
+        "Starting eval: "
+        f"provider={args.provider} "
+        f"agent_model={args.agent_model} "
+        f"user_model={args.user_model} "
+        f"users={args.users} "
+        f"cases={len(users)} "
+        f"jobs={args.jobs} "
+        f"output={output_dir}",
+        flush=True,
+    )
     cases = []
     scores = []
     if args.jobs == 1:
         for idx, card in enumerate(users, start=1):
-            print(f"[{idx}/{len(users)}] {card['user_id']} {card['target_service_categories'][0]}")
-            case = run_case_for_card(args, index, tools, card, ground_truth[card["user_id"]])
+            print(f"[{idx}/{len(users)}] start {card['user_id']} {card_label(card, ground_truth_by_case)}", flush=True)
+            case = run_case_for_card(args, index, tools, card, ground_truth_by_case[case_id(card)])
+            print(
+                f"[{idx}/{len(users)}] done {card['user_id']} "
+                f"stop={case['stop_reason']} hit={case['score']['ground_truth_hit']} "
+                f"turns={case['score']['turn_count']} tools={case['score']['tool_call_count']}",
+                flush=True,
+            )
             cases.append(case)
             scores.append(case["score"])
             write_json(conversations_dir / f"{card['user_id']}.json", case)
     else:
         with ThreadPoolExecutor(max_workers=args.jobs) as executor:
+            for idx, card in enumerate(users, start=1):
+                print(f"[{idx}/{len(users)}] queued {card['user_id']} {card_label(card, ground_truth_by_case)}", flush=True)
             futures = {
-                executor.submit(run_case_for_card, args, index, tools, card, ground_truth[card["user_id"]]): (
+                executor.submit(run_case_for_card, args, index, tools, card, ground_truth_by_case[case_id(card)]): (
                     idx,
                     card,
                 )
@@ -60,7 +76,12 @@ def run(args: argparse.Namespace) -> Path:
             for future in as_completed(futures):
                 idx, card = futures[future]
                 case = future.result()
-                print(f"[{idx}/{len(users)}] {card['user_id']} {card['target_service_categories'][0]}")
+                print(
+                    f"[{idx}/{len(users)}] done {card['user_id']} "
+                    f"stop={case['stop_reason']} hit={case['score']['ground_truth_hit']} "
+                    f"turns={case['score']['turn_count']} tools={case['score']['tool_call_count']}",
+                    flush=True,
+                )
                 cases.append(case)
                 scores.append(case["score"])
                 write_json(conversations_dir / f"{card['user_id']}.json", case)
@@ -72,6 +93,7 @@ def run(args: argparse.Namespace) -> Path:
         "agent_type": args.agent_type,
         "agent_model": args.agent_model,
         "user_type": "llm",
+        "user_set": user_set_name(args.users),
         "user_model": args.user_model,
         "sim_user": "llm",
         "sim_user_model": args.user_model,
@@ -84,6 +106,7 @@ def run(args: argparse.Namespace) -> Path:
             for reason in sorted({case["stop_reason"] for case in cases})
         },
         "token_usage": aggregate_token_usage(cases),
+        "simulated_user_diagnostics": aggregate_simulated_user_diagnostics(cases),
         "summary": aggregate(scores),
         "scores": scores,
     }
@@ -107,6 +130,30 @@ def run_case_for_card(args, index, tools: list[dict], card: dict, ground_truth: 
     return run_case(agent, simulated_user, card, ground_truth, args.max_turns)
 
 
+def load_ground_truth_from_cards(users: list[dict]) -> dict[str, dict]:
+    return {
+        case_id(card): {
+            "case_id": case_id(card),
+            "user_id": card.get("user_id", case_id(card)),
+            "ground_truth_resource_ids": card.get("ground_truth_resource_ids", []),
+            "target_service_categories": card.get("target_service_categories", []),
+        }
+        for card in users
+    }
+
+
+def case_id(card: dict) -> str:
+    return card.get("case_id") or card["user_id"].split("__", 1)[0]
+
+
+def card_label(card: dict, ground_truth_by_case: dict) -> str:
+    categories = card.get("target_service_categories")
+    if not categories:
+        ground_truth = ground_truth_by_case.get(case_id(card), {})
+        categories = ground_truth.get("target_service_categories") or []
+    return categories[0] if categories else "-"
+
+
 def run_case(agent: Agent, simulated_user, card: dict, ground_truth: dict, max_turns: int) -> dict:
     history = []
     transcript = []
@@ -120,11 +167,13 @@ def run_case(agent: Agent, simulated_user, card: dict, ground_truth: dict, max_t
         final_response = agent.ask(user_message, history=history, limit=None)
         add_token_usage(agent_token_usage, final_response.get("token_usage", {}))
         agent_text = final_response["output_text"]
-        completed = completion_flag(agent_text)
+        structured_result = parse_agent_result(agent_text)
+        final_response["structured_result"] = structured_result
+        completed = structured_result["completed"]
         transcript.append({"role": "agent", "content": agent_text})
         history = final_response["input"]
         if completed:
-            stop_reason = "completed"
+            stop_reason = structured_result["status"]
             break
         next_user_message = simulated_user.respond(agent_text)
         if not next_user_message:
@@ -135,6 +184,10 @@ def run_case(agent: Agent, simulated_user, card: dict, ground_truth: dict, max_t
         "agent": agent_token_usage,
         "simulated_user": getattr(simulated_user, "token_usage", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}),
     }
+    user_satisfaction = {}
+    if completed:
+        user_satisfaction = simulated_user.satisfaction(agent_text)
+        token_usage["simulated_user"] = getattr(simulated_user, "token_usage", token_usage["simulated_user"])
     token_usage["total"] = combine_token_usage(token_usage["agent"], token_usage["simulated_user"])
     return {
         "card": card,
@@ -143,16 +196,40 @@ def run_case(agent: Agent, simulated_user, card: dict, ground_truth: dict, max_t
         "response": final_response,
         "completed": completed,
         "stop_reason": stop_reason,
+        "user_satisfaction": user_satisfaction,
+        "simulated_user_diagnostics": getattr(simulated_user, "diagnostics", lambda: {})(),
         "token_usage": token_usage,
-        "score": score_case(card, ground_truth, transcript, final_response),
+        "score": score_case(card, ground_truth, transcript, final_response, user_satisfaction),
     }
 
 
 def completion_flag(agent_text: str) -> bool:
-    lines = [line.strip().lower() for line in agent_text.splitlines() if line.strip()]
-    if not lines:
-        return False
-    return lines[-1] == "completed: true"
+    return parse_agent_result(agent_text).get("completed") is True
+
+
+def parse_agent_result(agent_text: str) -> dict:
+    recommended = _extract_recommended_ids(agent_text)
+    if recommended:
+        return _agent_result("recommended", recommended)
+    return _agent_result("continue")
+
+
+def _agent_result(status: str, recommended: list[str] | None = None) -> dict:
+    recommended = recommended or []
+    return {
+        "status": status,
+        "completed": status == "recommended",
+        "recommended_resource_ids": recommended,
+    }
+
+
+def _extract_recommended_ids(agent_text: str) -> list[str]:
+    ids = []
+    for match in re.finditer(r"\bin211-[a-z0-9]+(?:-[a-z0-9]+)*\b", agent_text.lower()):
+        resource_id = match.group(0)
+        if resource_id not in ids:
+            ids.append(resource_id)
+    return ids
 
 
 def add_token_usage(total: dict, item: dict) -> None:
@@ -196,6 +273,17 @@ def aggregate_token_usage(cases: list[dict]) -> dict:
     }
 
 
+def aggregate_simulated_user_diagnostics(cases: list[dict]) -> dict:
+    trait_counts = {}
+    for case in cases:
+        diagnostics = case.get("simulated_user_diagnostics") or {}
+        for trait in diagnostics.get("traits") or []:
+            trait_counts[trait] = trait_counts.get(trait, 0) + 1
+    return {
+        "trait_counts": trait_counts,
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run simulated-user evaluation.")
     parser.add_argument("--provider", default="openai", choices=["openai", "openrouter"])
@@ -205,7 +293,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sim-user-model", dest="user_model")
     parser.add_argument("--index-path", type=Path, default=Path("data/indiana211/indiana211_resources_deduped.csv"))
     parser.add_argument("--users", type=Path, default=DEFAULT_USERS)
-    parser.add_argument("--ground-truth", type=Path, default=DEFAULT_GROUND_TRUTH)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--limit-users", type=int, default=0)
     parser.add_argument("--max-turns", type=int, default=8)
@@ -215,16 +302,21 @@ def parse_args() -> argparse.Namespace:
 
 
 def experiment_name(args: argparse.Namespace, case_count: int) -> str:
-    timestamp = time.strftime("%Y%m%d-%H%M%S")
-    return "__".join(
-        [
-            timestamp,
-            f"agent-{slug(args.agent_type)}",
-            f"agentmodel-{slug(args.agent_model)}",
-            f"usermodel-{slug(args.user_model)}",
-            f"n{case_count}",
-        ]
-    )
+    timestamp = time.strftime("%Y%m%d-%H%M")
+    agent_part = f"{slug(args.agent_type)}-{slug(args.agent_model)}"
+    user_part = f"{user_set_name(args.users)}-{slug(args.user_model)}"
+    return f"{timestamp}_{agent_part}_{user_part}_n{case_count}"
+
+
+def user_set_name(users_path: Path) -> str:
+    name = users_path.name.lower()
+    if "single_noncollab" in name or "noncollab" in name:
+        return "noncollab"
+    if "normal" in name:
+        return "normal"
+    if "all_variants" in name:
+        return "mixed"
+    return "base"
 
 
 def slug(value: str) -> str:
@@ -261,35 +353,40 @@ def render_report(summary: dict) -> str:
         f"- Provider: {summary['provider']}",
         f"- Agent type: {summary.get('agent_type')}",
         f"- Agent model: {summary.get('agent_model', summary['model'])}",
+        f"- User set: {summary.get('user_set', 'n/a')}",
         f"- User model: {summary.get('user_model')}",
         f"- Cases: {agg.get('cases', 0)}",
-        f"- Primary hit rate: {agg.get('primary_hit_rate', 0):.2%}",
-        f"- Acceptable hit rate: {agg.get('acceptable_hit_rate', 0):.2%}",
-        f"- Retrieval primary hit rate: {agg.get('retrieval_primary_hit_rate', 0):.2%}",
-        f"- Retrieval acceptable hit rate: {agg.get('retrieval_acceptable_hit_rate', 0):.2%}",
+        f"- Ground truth hit rate: {agg.get('ground_truth_hit_rate', 0):.2%}",
+        f"- Retrieval ground truth hit rate: {agg.get('retrieval_ground_truth_hit_rate', 0):.2%}",
         f"- Average tool calls: {agg.get('average_tool_calls', 0):.2f}",
-        f"- Average clarification score: {agg.get('average_clarification_score', 0):.2f}/4",
+        f"- Average satisfaction: {format_optional(agg.get('average_satisfaction'))}/5",
+        f"- Got relevant help rate: {format_optional_percent(agg.get('got_relevant_help_rate'))}",
+        f"- Average actionability: {format_optional(agg.get('average_actionability'))}/5",
+        f"- Multiple recommendation turns: {agg.get('multiple_recommendation_turn_rate', 0):.2%}",
+        f"- Recommended IDs not retrieved: {agg.get('recommended_ids_not_retrieved_rate', 0):.2%}",
         f"- Average total tokens per case: {summary.get('token_usage', {}).get('average_per_case', {}).get('total_tokens', 0):.0f}",
         f"- Completed cases: {summary.get('completed_cases', 0)}",
-        "",
-        "## By Difficulty",
-        "",
     ]
-    for difficulty, item in agg.get("by_difficulty", {}).items():
+    diagnostics = summary.get("simulated_user_diagnostics") or {}
+    if diagnostics:
         lines.extend(
             [
-                f"### {difficulty}",
-                "",
-                f"- Cases: {item['cases']}",
-                f"- Primary hit rate: {item['primary_hit_rate']:.2%}",
-                f"- Acceptable hit rate: {item['acceptable_hit_rate']:.2%}",
-                f"- Retrieval primary hit rate: {item['retrieval_primary_hit_rate']:.2%}",
-                f"- Retrieval acceptable hit rate: {item['retrieval_acceptable_hit_rate']:.2%}",
-                f"- Average clarification score: {item['average_clarification_score']:.2f}/4",
-                "",
+                f"- Trait counts: {diagnostics.get('trait_counts', {})}",
             ]
         )
     return "\n".join(lines)
+
+
+def format_optional(value) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.2f}"
+
+
+def format_optional_percent(value) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.2%}"
 
 
 if __name__ == "__main__":

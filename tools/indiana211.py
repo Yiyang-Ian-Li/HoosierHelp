@@ -3,12 +3,28 @@ from __future__ import annotations
 import csv
 import json
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
 
-from .curated_categories import (
-    service_categories_for_raw_subcategories,
-    validate_curated_category_coverage,
+from .curated_categories import service_categories_for_raw_subcategories
+from .indiana211_models import Resource, ResourceIndex, SearchRequest, SearchResult
+from .indiana211_schedule import (
+    DAY_VALUES,
+    format_minutes,
+    is_24_hour_window,
+    parse_24_hour_time,
+    schedule_status,
+    schedule_windows,
+    schedule_windows_from_json,
+)
+from .indiana211_tags import (
+    DOCUMENT_REQUIREMENT_MEANINGS,
+    ELIGIBILITY_TAG_MEANINGS,
+    FEE_OPTION_MEANINGS,
+    INTAKE_METHOD_MEANINGS,
+    document_requirements,
+    eligibility_tags,
+    fee_options,
+    intake_methods,
 )
 
 
@@ -16,148 +32,25 @@ DEFAULT_RESOURCE_INDEX = Path("data/indiana211/indiana211_resources_raw_all_coun
 DEFAULT_FULL_INDIANA_CSV = Path("data/indiana211/indiana211_resources_deduped.csv")
 
 TOOL_DESCRIPTION = (
-    "Search Indiana 211 resources. Non-empty fields are AND filters; values "
-    "within one field are OR alternatives. Counties filter by service area and "
-    "also allow statewide resources; cities and ZIP codes only improve ranking. "
-    "Use optional tag filters only for explicit user requirements."
+    "Search Indiana 211 resources. Non-empty fields are hard AND filters; values "
+    "within one field are OR alternatives. County filters match resources serving "
+    "that county, including statewide resources. Cities and ZIP codes are ranking "
+    "signals, not hard filters. Use optional tag filters only for explicit user requirements."
 )
-
-ELIGIBILITY_TAG_MEANINGS = {
-    "open": "resource appears open to the general public or has broad eligibility.",
-    "resident": "requires or emphasizes residence in a place or service area.",
-    "income": "has income, poverty, or low-income eligibility.",
-    "senior": "for older adults or people above a stated age.",
-    "children": "for children, youth, or households with children.",
-    "disability": "for people with disabilities or disability-related needs.",
-    "veteran": "for veterans, military members, or military families.",
-    "pregnant": "for pregnant people or pregnancy-related needs.",
-    "homeless": "for people experiencing homelessness or housing instability.",
-}
-
-SCHEDULE_TAG_MEANINGS = {
-    "weekdays": "available or scheduled Monday through Friday.",
-    "weekends": "available or scheduled Saturday/Sunday.",
-    "evening": "has evening hours or after-5pm availability.",
-    "24_hours": "available 24 hours or 24/7.",
-    "varies": "schedule varies or user should call/check for current hours.",
-}
-
-INTAKE_METHOD_MEANINGS = {
-    "call": "start by phone.",
-    "walk_in": "walk in without first applying online.",
-    "online": "start on a website, online form, or web portal.",
-    "appointment": "appointment or scheduled intake is needed.",
-    "email": "start or contact by email.",
-    "text": "start or contact by text message.",
-    "mail": "start or submit materials by postal mail.",
-}
-
-DOCUMENT_REQUIREMENT_MEANINGS = {
-    "none": "records indicate nothing is needed or no documents required.",
-    "varies": "documents vary or user must call/check.",
-    "photo_id": "photo ID or identification is needed.",
-    "proof_of_income": "income documentation, pay stubs, or similar proof is needed.",
-    "proof_of_address": "proof of address, residence, or current address is needed.",
-    "lease": "lease or rental agreement is needed.",
-    "insurance_card": "insurance card is needed.",
-    "social_security": "Social Security card/number/document is needed.",
-    "birth_certificate": "birth certificate is needed.",
-    "utility_bill": "utility bill is needed.",
-}
-
-FEE_OPTION_MEANINGS = {
-    "free": "no fee or free service is indicated.",
-    "sliding_scale": "fees vary by income or sliding scale.",
-    "varies": "cost varies or user should call/check.",
-    "insurance": "insurance, Medicaid, or Medicare may be accepted/required.",
-    "payment_required": "some fee, copay, cost, or payment is indicated.",
-}
 
 DERIVED_TAG_FIELDS = {
     "eligibility_tags",
-    "schedule_tags",
     "intake_methods",
     "document_requirements",
     "fee_options",
 }
 
 IGNORED_REQUEST_VALUES = {
-    "eligibility_tags": {"open"},
-    "schedule_tags": {"varies"},
-    "document_requirements": {"varies"},
-    "fee_options": {"varies"},
+    "eligibility_tags": {"empty", "open"},
+    "intake_methods": {"empty"},
+    "document_requirements": {"empty", "varies"},
+    "fee_options": {"empty", "varies"},
 }
-
-BROAD_AVAILABLE_VALUES = {
-    "eligibility_tags": {"open"},
-    "schedule_tags": {"varies"},
-    "document_requirements": {"none", "varies"},
-    "fee_options": {"free", "varies"},
-}
-
-
-@dataclass(frozen=True)
-class Resource:
-    resource_id: str
-    service_name: str
-    agency_name: str
-    site_name: str
-    taxonomy_categories: tuple[str, ...]
-    subcategories: tuple[str, ...]
-    service_categories: tuple[str, ...]
-    service_area: tuple[str, ...]
-    city: str
-    state: str
-    zipcode: str
-    address_1: str
-    phone: str
-    website: str
-    eligibility: str
-    site_schedule: str
-    site_details: str
-    fee_structure: str
-    documents_required: str
-    eligibility_tags: tuple[str, ...] = ()
-    schedule_tags: tuple[str, ...] = ()
-    intake_methods: tuple[str, ...] = ()
-    document_requirements: tuple[str, ...] = ()
-    fee_options: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class SearchRequest:
-    counties: tuple[str, ...] = ()
-    cities: tuple[str, ...] = ()
-    zipcodes: tuple[str, ...] = ()
-    service_categories: tuple[str, ...] = ()
-    eligibility_tags: tuple[str, ...] = ()
-    schedule_tags: tuple[str, ...] = ()
-    intake_methods: tuple[str, ...] = ()
-    document_requirements: tuple[str, ...] = ()
-    fee_options: tuple[str, ...] = ()
-    limit: int = 10
-
-
-@dataclass(frozen=True)
-class SearchResult:
-    resource: Resource
-    score: float
-    matched_filters: tuple[str, ...] = field(default_factory=tuple)
-
-
-class ResourceIndex:
-    def __init__(self, resources: list[Resource]):
-        self.resources = resources
-        self.by_id = {resource.resource_id: resource for resource in resources}
-        self.counties = sorted({county for r in resources for county in r.service_area})
-        self.cities = sorted({r.city for r in resources if r.city})
-        self.taxonomy_categories = sorted(
-            {category for r in resources for category in r.taxonomy_categories}
-        )
-        self.subcategories = sorted({subcategory for r in resources for subcategory in r.subcategories})
-        validate_curated_category_coverage(set(self.subcategories))
-        self.service_categories = sorted({category for r in resources for category in r.service_categories})
-
 
 def load_resource_index(path: Path | str = DEFAULT_RESOURCE_INDEX) -> ResourceIndex:
     resources = []
@@ -198,14 +91,15 @@ def load_indiana_csv(path: Path | str = DEFAULT_FULL_INDIANA_CSV) -> ResourceInd
                     website=_clean(row.get("service_website", "")),
                     eligibility=_clean(row.get("site_eligibility", "")),
                     site_schedule=_clean(row.get("site_schedule", "")),
+                    schedule_status=schedule_status(row.get("site_schedule", "")),
+                    schedule_windows=schedule_windows(row.get("site_schedule", "")),
                     site_details=_clean(row.get("site_details", "")),
                     fee_structure=_clean(row.get("fee_structure", "")),
                     documents_required=_clean(row.get("documents_required", "")),
-                    eligibility_tags=_eligibility_tags(row.get("site_eligibility", "")),
-                    schedule_tags=_schedule_tags(row.get("site_schedule", "")),
-                    intake_methods=_intake_methods(row.get("site_details", "")),
-                    document_requirements=_document_requirements(row.get("documents_required", "")),
-                    fee_options=_fee_options(row.get("fee_structure", "")),
+                    eligibility_tags=eligibility_tags(row.get("site_eligibility", "")),
+                    intake_methods=intake_methods(row.get("site_details", "")),
+                    document_requirements=document_requirements(row.get("documents_required", "")),
+                    fee_options=fee_options(row.get("fee_structure", "")),
                 )
             )
     return ResourceIndex(resources)
@@ -220,7 +114,7 @@ def search_resources_tool_schema(index: ResourceIndex) -> dict:
             "type": "object",
             "properties": {
                 "counties": _array_schema(
-                    "User county names in uppercase, such as MARION or ALLEN. Used against resource service_area."
+                    "User county names in uppercase, such as MARION or ALLEN. Matches resources serving that county, including statewide resources."
                 ),
                 "cities": _array_schema(
                     "User city names explicitly stated by the user. Ranking boost only."
@@ -245,17 +139,45 @@ def search_resources_tool_schema(index: ResourceIndex) -> dict:
                         "homeless",
                     ],
                     "Eligibility requirements explicitly needed by the user. Do not add general user traits as filters unless required.\n"
-                    + _value_meanings(ELIGIBILITY_TAG_MEANINGS.keys(), ELIGIBILITY_TAG_MEANINGS),
+                    + _value_meanings(
+                        [
+                            "open",
+                            "resident",
+                            "income",
+                            "senior",
+                            "children",
+                            "disability",
+                            "veteran",
+                            "pregnant",
+                            "homeless",
+                        ],
+                        ELIGIBILITY_TAG_MEANINGS,
+                    ),
                 ),
-                "schedule_tags": _enum_array_schema(
-                    ["weekdays", "weekends", "evening", "24_hours", "varies"],
-                    "Schedule requirements explicitly needed by the user.\n"
-                    + _value_meanings(SCHEDULE_TAG_MEANINGS.keys(), SCHEDULE_TAG_MEANINGS),
+                "available_days": _enum_array_schema(
+                    list(DAY_VALUES),
+                    "Days the user explicitly needs availability. Use mon/tue/wed/thu/fri/sat/sun.",
                 ),
+                "available_at_or_after": {
+                    "type": "string",
+                    "description": "Earliest clock time the resource must be open until, formatted HH:MM in 24-hour time, such as 17:00. Use only for explicit time needs.",
+                },
+                "requires_weekend": {
+                    "type": "boolean",
+                    "description": "Use true only when the user requires Saturday or Sunday availability.",
+                },
+                "requires_24_hours": {
+                    "type": "boolean",
+                    "description": "Use true only when the user requires 24-hour availability.",
+                },
+                "allow_appointment_only": {
+                    "type": "boolean",
+                    "description": "Use true when appointment-only resources are acceptable for the user's schedule need.",
+                },
                 "intake_methods": _enum_array_schema(
                     ["call", "walk_in", "online", "appointment", "email", "text", "mail"],
                     "Required intake/contact method. Do not filter on methods the user merely says they can use.\n"
-                    + _value_meanings(INTAKE_METHOD_MEANINGS.keys(), INTAKE_METHOD_MEANINGS),
+                    + _value_meanings(["call", "walk_in", "online", "appointment", "email", "text", "mail"], INTAKE_METHOD_MEANINGS),
                 ),
                 "document_requirements": _enum_array_schema(
                     [
@@ -271,12 +193,26 @@ def search_resources_tool_schema(index: ResourceIndex) -> dict:
                         "utility_bill",
                     ],
                     "Document constraints explicitly required by the user.\n"
-                    + _value_meanings(DOCUMENT_REQUIREMENT_MEANINGS.keys(), DOCUMENT_REQUIREMENT_MEANINGS),
+                    + _value_meanings(
+                        [
+                            "none",
+                            "varies",
+                            "photo_id",
+                            "proof_of_income",
+                            "proof_of_address",
+                            "lease",
+                            "insurance_card",
+                            "social_security",
+                            "birth_certificate",
+                            "utility_bill",
+                        ],
+                        DOCUMENT_REQUIREMENT_MEANINGS,
+                    ),
                 ),
                 "fee_options": _enum_array_schema(
-                    ["free", "sliding_scale", "varies", "insurance", "payment_required"],
+                    ["unknown", "free", "sliding_scale", "varies", "insurance", "payment_required"],
                     "Fee/payment requirements explicitly stated by the user.\n"
-                    + _value_meanings(FEE_OPTION_MEANINGS.keys(), FEE_OPTION_MEANINGS),
+                    + _value_meanings(["unknown", "free", "sliding_scale", "varies", "insurance", "payment_required"], FEE_OPTION_MEANINGS),
                 ),
                 "limit": {
                     "type": "integer",
@@ -330,7 +266,11 @@ def request_from_tool_args(args: dict, limit: int | None = None) -> SearchReques
         zipcodes=_string_tuple(args.get("zipcodes")),
         service_categories=_string_tuple(args.get("service_categories")),
         eligibility_tags=_string_tuple(args.get("eligibility_tags")),
-        schedule_tags=_string_tuple(args.get("schedule_tags")),
+        available_days=_day_tuple(args.get("available_days")),
+        available_at_or_after=_clean(args.get("available_at_or_after", "")),
+        requires_weekend=bool(args.get("requires_weekend")),
+        requires_24_hours=bool(args.get("requires_24_hours")),
+        allow_appointment_only=bool(args.get("allow_appointment_only")),
         intake_methods=_string_tuple(args.get("intake_methods")),
         document_requirements=_string_tuple(args.get("document_requirements")),
         fee_options=_string_tuple(args.get("fee_options")),
@@ -345,26 +285,26 @@ def search_resources_tool_result(results: list[SearchResult]) -> dict:
                 "resource_id": result.resource.resource_id,
                 "service_name": result.resource.service_name,
                 "agency_name": result.resource.agency_name,
-                "site_name": result.resource.site_name,
-                "service_categories": result.resource.service_categories,
                 "service_area": result.resource.service_area,
                 "city": result.resource.city,
-                "state": result.resource.state,
                 "zipcode": result.resource.zipcode,
                 "address": result.resource.address_1,
                 "phone": result.resource.phone,
                 "website": result.resource.website,
                 "eligibility": result.resource.eligibility,
-                "site_schedule": result.resource.site_schedule,
-                "site_details": result.resource.site_details,
-                "fee_structure": result.resource.fee_structure,
-                "documents_required": result.resource.documents_required,
-                "eligibility_tags": result.resource.eligibility_tags,
-                "schedule_tags": result.resource.schedule_tags,
-                "intake_methods": result.resource.intake_methods,
-                "document_requirements": result.resource.document_requirements,
-                "fee_options": result.resource.fee_options,
-                "matched_filters": result.matched_filters,
+                "schedule": result.resource.site_schedule,
+                "schedule_status": result.resource.schedule_status,
+                "schedule_windows": [
+                    {
+                        "day": window.day,
+                        "start": format_minutes(window.start_minute),
+                        "end": format_minutes(window.end_minute),
+                    }
+                    for window in result.resource.schedule_windows
+                ],
+                "intake": result.resource.site_details,
+                "fees": result.resource.fee_structure,
+                "documents": result.resource.documents_required,
             }
             for result in results
         ]
@@ -384,7 +324,6 @@ def _bounded_limit(value: object, fallback: int | None = None) -> int:
 def _match_resource(resource: Resource, request: SearchRequest) -> tuple[list[str], float] | None:
     derived_checks = [
         ("eligibility_tags", request.eligibility_tags, resource.eligibility_tags),
-        ("schedule_tags", request.schedule_tags, resource.schedule_tags),
         ("intake_methods", request.intake_methods, resource.intake_methods),
         ("document_requirements", request.document_requirements, resource.document_requirements),
         ("fee_options", request.fee_options, resource.fee_options),
@@ -397,7 +336,7 @@ def _match_resource(resource: Resource, request: SearchRequest) -> tuple[list[st
             score += 2.0
         elif _exact_any(("STATEWIDE", "ALL"), resource.service_area):
             matched.append("statewide")
-            score += 0.5
+            score += 2.0
         else:
             return None
     if request.cities:
@@ -412,6 +351,12 @@ def _match_resource(resource: Resource, request: SearchRequest) -> tuple[list[st
         if not _exact_any(request.service_categories, resource.service_categories):
             return None
         matched.append("service_categories")
+        score += 1.0
+    schedule_check = _match_schedule(resource, request)
+    if schedule_check is None:
+        return None
+    if schedule_check:
+        matched.append("schedule")
         score += 1.0
     for name, requested, available in derived_checks:
         check = _match_derived_tag_field(name, requested, available)
@@ -428,22 +373,46 @@ def _match_derived_tag_field(name: str, requested: tuple[str, ...], available: t
     if not requested:
         return False
     if not available:
-        return False
-    if _has_broad_available_value(name, available):
-        return True
+        return None
     if _exact_any(requested, available):
         return True
     return None
 
 
+def _match_schedule(resource: Resource, request: SearchRequest) -> bool | None:
+    has_constraint = bool(
+        request.available_days
+        or request.available_at_or_after
+        or request.requires_weekend
+        or request.requires_24_hours
+    )
+    if not has_constraint:
+        return False
+    if resource.schedule_status == "appointment_only":
+        return True if request.allow_appointment_only else None
+    if resource.schedule_status != "structured":
+        return None
+    windows = resource.schedule_windows
+    if request.requires_24_hours:
+        windows = tuple(window for window in windows if is_24_hour_window(window))
+    requested_days = set(request.available_days)
+    if request.requires_weekend:
+        requested_days.update(("sat", "sun"))
+    if requested_days:
+        windows = tuple(window for window in windows if window.day in requested_days)
+    requested_time = parse_24_hour_time(request.available_at_or_after)
+    if requested_time is not None:
+        windows = tuple(
+            window
+            for window in windows
+            if is_24_hour_window(window) or window.end_minute > requested_time
+        )
+    return True if windows else None
+
+
 def _remove_ignored_requested_values(name: str, requested: tuple[str, ...]) -> tuple[str, ...]:
     ignored = IGNORED_REQUEST_VALUES.get(name, set())
-    return tuple(value for value in requested if value not in ignored)
-
-
-def _has_broad_available_value(name: str, available: tuple[str, ...]) -> bool:
-    broad = BROAD_AVAILABLE_VALUES.get(name, set())
-    return any(value in broad for value in available)
+    return tuple(value for value in requested if _norm(value) not in ignored)
 
 
 def _resource_from_json(row: dict) -> Resource:
@@ -469,14 +438,15 @@ def _resource_from_json(row: dict) -> Resource:
         website=str(contact.get("website", "")),
         eligibility=str(row.get("eligibility", "")),
         site_schedule=str(row.get("site_schedule", "")),
+        schedule_status=str(row.get("schedule_status") or schedule_status(row.get("site_schedule", ""))),
+        schedule_windows=schedule_windows_from_json(row),
         site_details=str(row.get("site_details", "")),
         fee_structure=str(row.get("fee_structure", "")),
         documents_required=str(row.get("documents_required", "")),
-        eligibility_tags=tuple(row.get("eligibility_tags") or _eligibility_tags(row.get("eligibility", ""))),
-        schedule_tags=tuple(row.get("schedule_tags") or _schedule_tags(row.get("site_schedule", ""))),
-        intake_methods=tuple(row.get("intake_methods") or _intake_methods(row.get("site_details", ""))),
-        document_requirements=tuple(row.get("document_requirements") or _document_requirements(row.get("documents_required", ""))),
-        fee_options=tuple(row.get("fee_options") or _fee_options(row.get("fee_structure", ""))),
+        eligibility_tags=tuple(row.get("eligibility_tags") or eligibility_tags(row.get("eligibility", ""))),
+        intake_methods=tuple(row.get("intake_methods") or intake_methods(row.get("site_details", ""))),
+        document_requirements=tuple(row.get("document_requirements") or document_requirements(row.get("documents_required", ""))),
+        fee_options=tuple(row.get("fee_options") or fee_options(row.get("fee_structure", ""))),
     )
 
 
@@ -517,14 +487,15 @@ def _resource_from_raw_group(row: dict) -> Resource:
         website=_clean(row.get("service_website", "")),
         eligibility=_clean(row.get("site_eligibility", "")),
         site_schedule=_clean(row.get("site_schedule", "")),
+        schedule_status=schedule_status(row.get("site_schedule", "")),
+        schedule_windows=schedule_windows(row.get("site_schedule", "")),
         site_details=_clean(row.get("site_details", "")),
         fee_structure=_clean(row.get("fee_structure", "")),
         documents_required=_clean(row.get("documents_required", "")),
-        eligibility_tags=_eligibility_tags(row.get("site_eligibility", "")),
-        schedule_tags=_schedule_tags(row.get("site_schedule", "")),
-        intake_methods=_intake_methods(row.get("site_details", "")),
-        document_requirements=_document_requirements(row.get("documents_required", "")),
-        fee_options=_fee_options(row.get("fee_structure", "")),
+        eligibility_tags=eligibility_tags(row.get("site_eligibility", "")),
+        intake_methods=intake_methods(row.get("site_details", "")),
+        document_requirements=document_requirements(row.get("documents_required", "")),
+        fee_options=fee_options(row.get("fee_structure", "")),
     )
 
 
@@ -562,6 +533,19 @@ def _string_tuple(value: object) -> tuple[str, ...]:
     return tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
 
 
+def _day_tuple(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    days = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        day = _norm(item)[:3]
+        if day in DAY_VALUES and day not in days:
+            days.append(day)
+    return tuple(days)
+
+
 def _append_unique(values: list[str], value: str) -> None:
     if value and value not in values:
         values.append(value)
@@ -575,74 +559,3 @@ def _clean(value: object) -> str:
     if value is None:
         return ""
     return " ".join(str(value).split())
-
-
-def _eligibility_tags(text: object) -> tuple[str, ...]:
-    text = _clean(text).lower()
-    tags = []
-    _tag(tags, "open", "open" in text and len(text) < 80)
-    _tag(tags, "resident", "living in" in text or "resident" in text or "county" in text)
-    _tag(tags, "income", "income" in text or "poverty" in text)
-    _tag(tags, "senior", "senior" in text or "older" in text or "age 60" in text or "age 65" in text)
-    _tag(tags, "children", "child" in text or "children" in text or "youth" in text or "age 0-18" in text)
-    _tag(tags, "disability", "disab" in text)
-    _tag(tags, "veteran", "veteran" in text or "military" in text)
-    _tag(tags, "pregnant", "pregnan" in text)
-    _tag(tags, "homeless", "homeless" in text)
-    return tuple(tags)
-
-
-def _schedule_tags(text: object) -> tuple[str, ...]:
-    text = _clean(text).lower()
-    tags = []
-    _tag(tags, "weekdays", any(day in text for day in ("mon", "tues", "wed", "thur", "fri")))
-    _tag(tags, "weekends", "sat" in text or "sun" in text or "weekend" in text)
-    _tag(tags, "evening", "pm" in text and any(hour in text for hour in ("5", "6", "7", "8", "9", "10", "11")))
-    _tag(tags, "24_hours", "24 hour" in text or "24/7" in text or "daily 24" in text)
-    _tag(tags, "varies", "vary" in text or "varies" in text)
-    return tuple(tags)
-
-
-def _intake_methods(text: object) -> tuple[str, ...]:
-    text = _clean(text).lower()
-    tags = []
-    _tag(tags, "call", "call" in text or "phone" in text)
-    _tag(tags, "walk_in", "walk in" in text or "walk-in" in text)
-    _tag(tags, "online", "online" in text or "website" in text or "visit www" in text)
-    _tag(tags, "appointment", "appointment" in text or "schedule" in text)
-    _tag(tags, "email", "email" in text or "e-mail" in text)
-    _tag(tags, "text", "text" in text)
-    _tag(tags, "mail", "mail" in text)
-    return tuple(tags)
-
-
-def _document_requirements(text: object) -> tuple[str, ...]:
-    text = _clean(text).lower()
-    tags = []
-    _tag(tags, "none", "nothing needed" in text or "nothing required" in text or text in {"none", "n/a"})
-    _tag(tags, "varies", "varies" in text or "call for" in text)
-    _tag(tags, "photo_id", "photo id" in text or "identification" in text)
-    _tag(tags, "proof_of_income", "proof of income" in text or "pay stub" in text or "income documentation" in text)
-    _tag(tags, "proof_of_address", "proof of address" in text or "current address" in text or "residency" in text)
-    _tag(tags, "lease", "lease" in text)
-    _tag(tags, "insurance_card", "insurance card" in text)
-    _tag(tags, "social_security", "social security" in text)
-    _tag(tags, "birth_certificate", "birth certificate" in text)
-    _tag(tags, "utility_bill", "utility bill" in text)
-    return tuple(tags)
-
-
-def _fee_options(text: object) -> tuple[str, ...]:
-    text = _clean(text).lower()
-    tags = []
-    _tag(tags, "free", "free" in text or "no fee" in text or text == "none")
-    _tag(tags, "sliding_scale", "sliding" in text)
-    _tag(tags, "varies", "varies" in text or "vary" in text)
-    _tag(tags, "insurance", "insurance" in text or "medicaid" in text or "medicare" in text)
-    _tag(tags, "payment_required", "$" in text or "copay" in text or "fee" in text or "cost" in text)
-    return tuple(tags)
-
-
-def _tag(tags: list[str], tag: str, condition: bool) -> None:
-    if condition and tag not in tags:
-        tags.append(tag)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 
 
-RESOURCE_ID_RE = re.compile(r"\bin211-[a-z0-9-]+\b", re.IGNORECASE)
+RESOURCE_ID_RE = re.compile(r"\bin211-[a-z0-9]+(?:-[a-z0-9]+)*\b", re.IGNORECASE)
 
 
 def extract_resource_ids(response: dict) -> list[str]:
@@ -25,43 +25,87 @@ def extract_resource_ids(response: dict) -> list[str]:
     return ids
 
 
-def extract_recommended_resource_ids(response: dict) -> list[str]:
+def extract_recommended_resource_ids(response: dict, transcript: list[dict] | None = None) -> list[str]:
+    if transcript:
+        transcript_ids = extract_last_recommended_resource_ids_from_transcript(transcript)
+        if transcript_ids:
+            return transcript_ids
     ids = []
-    for resource_id in RESOURCE_ID_RE.findall(response.get("output_text", "")):
-        normalized = resource_id.lower()
+    result = response.get("structured_result") or {}
+    for resource_id in result.get("recommended_resource_ids", []) or []:
+        if not isinstance(resource_id, str):
+            continue
+        normalized = resource_id.strip().lower()
         if normalized not in ids:
             ids.append(normalized)
     return ids
 
 
-def score_case(card: dict, ground_truth: dict, transcript: list[dict], final_response: dict) -> dict:
+def extract_last_recommended_resource_ids_from_transcript(transcript: list[dict]) -> list[str]:
+    for turn in reversed(transcript):
+        if turn.get("role") != "agent":
+            continue
+        ids = extract_resource_ids_from_text(str(turn.get("content", "")))
+        if ids:
+            return ids
+    return []
+
+
+def extract_resource_ids_from_text(text: str) -> list[str]:
+    ids = []
+    for match in RESOURCE_ID_RE.finditer(text):
+        resource_id = match.group(0).lower()
+        if resource_id not in ids:
+            ids.append(resource_id)
+    return ids
+
+
+def score_case(
+    card: dict,
+    ground_truth: dict,
+    transcript: list[dict],
+    final_response: dict,
+    user_satisfaction: dict | None = None,
+) -> dict:
     retrieved_ids = extract_resource_ids(final_response)
-    recommended_ids = extract_recommended_resource_ids(final_response)
-    for resource_id in extract_recommended_resource_ids_from_transcript(transcript):
-        if resource_id not in recommended_ids:
-            recommended_ids.append(resource_id)
-    primary = set(ground_truth.get("primary_gt_resource_ids", []))
-    acceptable = set(ground_truth.get("acceptable_gt_resource_ids", []))
-    text = transcript_text(transcript)
-    asked_items = {
-        "location_or_zip": any(term in text for term in ["zip", "county", "city", "where are you", "location"]),
-        "urgency": any(term in text for term in ["urgent", "when", "deadline", "appointment", "tonight", "shutoff"]),
-        "constraints": any(term in text for term in ["transport", "ride", "bus", "car", "language", "phone", "accessible"]),
-        "household_or_eligibility": any(term in text for term in ["household", "children", "older", "pregnant", "veteran", "disability", "income"]),
-    }
+    recommended_ids = extract_recommended_resource_ids(final_response, transcript)
+    expected = set(ground_truth.get("ground_truth_resource_ids", []))
+    satisfaction = user_satisfaction or {}
+    diagnostics = recommendation_diagnostics(transcript, final_response, retrieved_ids)
+    ground_truth_hit = bool(expected & set(recommended_ids))
+    retrieval_ground_truth_hit = bool(expected & set(retrieved_ids))
     return {
         "user_id": card["user_id"],
-        "difficulty": card["difficulty"],
         "retrieved_resource_ids": retrieved_ids,
         "recommended_resource_ids": recommended_ids,
-        "primary_hit": bool(primary & set(recommended_ids)),
-        "acceptable_hit": bool(acceptable & set(recommended_ids)),
-        "retrieval_primary_hit": bool(primary & set(retrieved_ids)),
-        "retrieval_acceptable_hit": bool(acceptable & set(retrieved_ids)),
+        "ground_truth_hit": ground_truth_hit,
+        "retrieval_ground_truth_hit": retrieval_ground_truth_hit,
         "tool_call_count": count_function_calls(final_response),
         "turn_count": len([turn for turn in transcript if turn["role"] == "user"]),
-        "asked_items": asked_items,
-        "clarification_score": sum(1 for value in asked_items.values() if value),
+        "user_satisfaction": satisfaction,
+        "satisfaction": numeric_or_none(satisfaction.get("satisfaction")),
+        "got_relevant_help": bool_or_none(satisfaction.get("got_relevant_help")),
+        "felt_understood": bool_or_none(satisfaction.get("felt_understood")),
+        "actionability": numeric_or_none(satisfaction.get("actionability")),
+        **diagnostics,
+    }
+
+
+def recommendation_diagnostics(
+    transcript: list[dict],
+    final_response: dict,
+    retrieved_ids: list[str],
+) -> dict:
+    agent_turns = [str(turn.get("content", "")) for turn in transcript if turn.get("role") == "agent"]
+    recommendation_turns = [text for text in agent_turns if extract_resource_ids_from_text(text)]
+    retrieved = {resource_id.lower() for resource_id in retrieved_ids}
+    recommended = extract_last_recommended_resource_ids_from_transcript(transcript)
+    return {
+        "recommendation_turn_count": len(recommendation_turns),
+        "multiple_recommendation_turns": len(recommendation_turns) > 1,
+        "recommended_ids_not_retrieved": [
+            resource_id for resource_id in recommended if resource_id not in retrieved
+        ],
     }
 
 
@@ -72,18 +116,6 @@ def count_function_calls(response: dict) -> int:
         sum(1 for item in response.get("input", []) if item_get(item, "type") == "function_call"),
     )
     return calls
-
-
-def extract_recommended_resource_ids_from_transcript(transcript: list[dict]) -> list[str]:
-    ids = []
-    for turn in transcript:
-        if turn.get("role") != "agent":
-            continue
-        for resource_id in RESOURCE_ID_RE.findall(str(turn.get("content", ""))):
-            normalized = resource_id.lower()
-            if normalized not in ids:
-                ids.append(normalized)
-    return ids
 
 
 def item_get(item, key: str):
@@ -107,31 +139,20 @@ def aggregate(scores: list[dict]) -> dict:
         return {}
     return {
         "cases": len(scores),
-        "primary_hit_rate": mean(score["primary_hit"] for score in scores),
-        "acceptable_hit_rate": mean(score["acceptable_hit"] for score in scores),
-        "retrieval_primary_hit_rate": mean(score["retrieval_primary_hit"] for score in scores),
-        "retrieval_acceptable_hit_rate": mean(score["retrieval_acceptable_hit"] for score in scores),
+        "ground_truth_hit_rate": mean(score.get("ground_truth_hit") for score in scores),
+        "retrieval_ground_truth_hit_rate": mean(score["retrieval_ground_truth_hit"] for score in scores),
         "average_tool_calls": sum(score["tool_call_count"] for score in scores) / len(scores),
-        "average_clarification_score": sum(score["clarification_score"] for score in scores) / len(scores),
-        "by_difficulty": {
-            difficulty: {
-                "cases": len(group),
-                "primary_hit_rate": mean(score["primary_hit"] for score in group),
-                "acceptable_hit_rate": mean(score["acceptable_hit"] for score in group),
-                "retrieval_primary_hit_rate": mean(score["retrieval_primary_hit"] for score in group),
-                "retrieval_acceptable_hit_rate": mean(score["retrieval_acceptable_hit"] for score in group),
-                "average_clarification_score": sum(score["clarification_score"] for score in group) / len(group),
-            }
-            for difficulty, group in groups_by_difficulty(scores).items()
-        },
+        "average_satisfaction": mean_numeric(score.get("satisfaction") for score in scores),
+        "got_relevant_help_rate": mean_optional(score.get("got_relevant_help") for score in scores),
+        "felt_understood_rate": mean_optional(score.get("felt_understood") for score in scores),
+        "average_actionability": mean_numeric(score.get("actionability") for score in scores),
+        "multiple_recommendation_turn_rate": mean(
+            score.get("multiple_recommendation_turns") for score in scores
+        ),
+        "recommended_ids_not_retrieved_rate": mean(
+            bool(score.get("recommended_ids_not_retrieved")) for score in scores
+        ),
     }
-
-
-def groups_by_difficulty(scores: list[dict]) -> dict[str, list[dict]]:
-    groups = {}
-    for score in scores:
-        groups.setdefault(score["difficulty"], []).append(score)
-    return groups
 
 
 def mean(values) -> float:
@@ -139,5 +160,30 @@ def mean(values) -> float:
     return sum(1 for value in values if value) / len(values)
 
 
-def transcript_text(transcript: list[dict]) -> str:
-    return "\n".join(str(turn.get("content", "")) for turn in transcript).lower()
+def mean_optional(values) -> float | None:
+    values = [value for value in values if value is not None]
+    if not values:
+        return None
+    return mean(values)
+
+
+def mean_numeric(values) -> float | None:
+    values = [value for value in values if isinstance(value, (int, float))]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def numeric_or_none(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def bool_or_none(value):
+    return value if isinstance(value, bool) else None
