@@ -1,7 +1,5 @@
-from .agent import AGENT_INSTRUCTIONS, REACT_INSTRUCTIONS, Agent
+from .agent import Agent
 
 __all__ = [
-    "AGENT_INSTRUCTIONS",
-    "REACT_INSTRUCTIONS",
     "Agent",
 ]

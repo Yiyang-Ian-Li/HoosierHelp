@@ -5,19 +5,20 @@ import time
 
 from agent import Agent
 from agent.llm import load_dotenv, make_openai_client
-from eval.run_eval import agent_instructions
+from eval.agent_instructions import agent_instructions
 from tools.indiana211 import (
     execute_search_resources,
-    load_indiana_csv,
+    load_resource_index,
     search_resources_tool_schema,
 )
 
 
 CONFIG = {
     "provider": "openai",
-    "index_path": "data/indiana211/indiana211_resources_deduped.csv",
+    "index_path": "data/benchmark/filtered_resources_tagged.csv",
     "agent_type": "default",  # "default" or "react"
     "agent_model": "gpt-4.1-mini",
+    "difficulty": "easy",
     "query": "I need a food pantry in Marion County.",
     "limit": 10,
 }
@@ -25,16 +26,16 @@ CONFIG = {
 
 def main() -> None:
     load_dotenv()
-    index = load_indiana_csv(CONFIG["index_path"])
+    index = load_resource_index(CONFIG["index_path"])
     client = make_openai_client(CONFIG["provider"])
     agent = Agent(
         client=client,
         model=CONFIG["agent_model"],
-        tools=[search_resources_tool_schema(index)],
+        tools=[search_resources_tool_schema(index, difficulty=CONFIG["difficulty"])],
         tool_functions={
             "search_resources": lambda args, limit: execute_search_resources(index, args, limit)
         },
-        instructions=agent_instructions(CONFIG["agent_type"]),
+        instructions=agent_instructions(CONFIG["agent_type"], difficulty=CONFIG["difficulty"]),
     )
 
     started = time.time()
@@ -44,6 +45,7 @@ def main() -> None:
     print(f"Loaded {len(index.resources)} resources")
     print(f"Agent type: {CONFIG['agent_type']}")
     print(f"Agent model: {CONFIG['agent_model']}")
+    print(f"Difficulty protocol: {CONFIG['difficulty']}")
     print(f"Query: {CONFIG['query']}")
     print(f"Finished in {elapsed:.1f}s")
     print()

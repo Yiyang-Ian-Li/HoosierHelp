@@ -9,11 +9,12 @@ from eval.run_eval import run as run_eval
 
 CONFIG = {
     "provider": "openai",
-    "index_path": "data/indiana211/indiana211_resources_deduped.csv",
+    "index_path": "data/benchmark/filtered_resources_tagged.csv",
     "agent_type": "default",  # "default" or "react"
     "agent_model": "gpt-4.1-mini",
     "user_model": "gpt-4.1-mini",
     "users": "data/benchmark/user_cards.json",
+    "difficulty": "all",
     "output_dir": "experiments",
     "limit_users": 0,
     "max_turns": 8,
@@ -34,6 +35,7 @@ def eval_args(config: dict) -> Namespace:
         user_model=config["user_model"],
         index_path=Path(config["index_path"]),
         users=Path(config["users"]),
+        difficulty=config["difficulty"],
         output_dir=Path(config["output_dir"]),
         limit_users=config["limit_users"],
         max_turns=config["max_turns"],

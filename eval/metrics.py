@@ -65,12 +65,10 @@ def score_case(
     ground_truth: dict,
     transcript: list[dict],
     final_response: dict,
-    user_satisfaction: dict | None = None,
 ) -> dict:
     retrieved_ids = extract_resource_ids(final_response)
     recommended_ids = extract_recommended_resource_ids(final_response, transcript)
     expected = set(ground_truth.get("ground_truth_resource_ids", []))
-    satisfaction = user_satisfaction or {}
     diagnostics = recommendation_diagnostics(transcript, final_response, retrieved_ids)
     ground_truth_hit = bool(expected & set(recommended_ids))
     retrieval_ground_truth_hit = bool(expected & set(retrieved_ids))
@@ -82,11 +80,6 @@ def score_case(
         "retrieval_ground_truth_hit": retrieval_ground_truth_hit,
         "tool_call_count": count_function_calls(final_response),
         "turn_count": len([turn for turn in transcript if turn["role"] == "user"]),
-        "user_satisfaction": satisfaction,
-        "satisfaction": numeric_or_none(satisfaction.get("satisfaction")),
-        "got_relevant_help": bool_or_none(satisfaction.get("got_relevant_help")),
-        "felt_understood": bool_or_none(satisfaction.get("felt_understood")),
-        "actionability": numeric_or_none(satisfaction.get("actionability")),
         **diagnostics,
     }
 
@@ -142,10 +135,7 @@ def aggregate(scores: list[dict]) -> dict:
         "ground_truth_hit_rate": mean(score.get("ground_truth_hit") for score in scores),
         "retrieval_ground_truth_hit_rate": mean(score["retrieval_ground_truth_hit"] for score in scores),
         "average_tool_calls": sum(score["tool_call_count"] for score in scores) / len(scores),
-        "average_satisfaction": mean_numeric(score.get("satisfaction") for score in scores),
-        "got_relevant_help_rate": mean_optional(score.get("got_relevant_help") for score in scores),
-        "felt_understood_rate": mean_optional(score.get("felt_understood") for score in scores),
-        "average_actionability": mean_numeric(score.get("actionability") for score in scores),
+        "average_turns": sum(score["turn_count"] for score in scores) / len(scores),
         "multiple_recommendation_turn_rate": mean(
             score.get("multiple_recommendation_turns") for score in scores
         ),
@@ -155,35 +145,51 @@ def aggregate(scores: list[dict]) -> dict:
     }
 
 
+def aggregate_breakdown(cases: list[dict]) -> dict:
+    return {
+        "by_difficulty": _aggregate_case_groups(
+            cases,
+            lambda case: str(case.get("card", {}).get("difficulty") or "unknown"),
+        ),
+        "by_trait": _aggregate_case_groups(
+            cases,
+            lambda case: _case_trait(case),
+        ),
+    }
+
+
+def _aggregate_case_groups(cases: list[dict], group_key) -> dict:
+    groups = {}
+    for case in cases:
+        key = group_key(case)
+        groups.setdefault(key, []).append(case)
+    return {
+        key: _aggregate_case_group(group_cases)
+        for key, group_cases in sorted(groups.items())
+    }
+
+
+def _aggregate_case_group(cases: list[dict]) -> dict:
+    scores = [case["score"] for case in cases]
+    case_count = len(cases)
+    ground_truth_hits = sum(1 for score in scores if score.get("ground_truth_hit"))
+    retrieval_hits = sum(1 for score in scores if score.get("retrieval_ground_truth_hit"))
+    no_match_count = sum(1 for case in cases if case.get("stop_reason") == "no_match")
+    return {
+        "cases": case_count,
+        "ground_truth_hits": ground_truth_hits,
+        "ground_truth_hit_rate": ground_truth_hits / case_count if case_count else 0,
+        "retrieval_ground_truth_hits": retrieval_hits,
+        "retrieval_ground_truth_hit_rate": retrieval_hits / case_count if case_count else 0,
+        "no_match_count": no_match_count,
+        "average_turns": sum(score["turn_count"] for score in scores) / case_count if case_count else 0,
+    }
+
+
+def _case_trait(case: dict) -> str:
+    return str(case["card"]["traits"][0])
+
+
 def mean(values) -> float:
     values = list(values)
     return sum(1 for value in values if value) / len(values)
-
-
-def mean_optional(values) -> float | None:
-    values = [value for value in values if value is not None]
-    if not values:
-        return None
-    return mean(values)
-
-
-def mean_numeric(values) -> float | None:
-    values = [value for value in values if isinstance(value, (int, float))]
-    if not values:
-        return None
-    return sum(values) / len(values)
-
-
-def numeric_or_none(value):
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return value
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def bool_or_none(value):
-    return value if isinstance(value, bool) else None

@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from eval.metrics import aggregate, parse_tool_output, score_case
+from eval.metrics import aggregate, aggregate_breakdown, parse_tool_output, score_case
 
 
 def main() -> None:
@@ -16,7 +16,7 @@ def main() -> None:
     case_paths = [
         path
         for path in sorted(case_dir(args.run_dir).glob("*.json"))
-        if path.name != "summary.json" and path.name.startswith(("su-", "llu-"))
+        if path.name != "summary.json"
     ]
     cases = [json.loads(path.read_text(encoding="utf-8")) for path in case_paths]
     scores = [
@@ -25,7 +25,6 @@ def main() -> None:
             case["ground_truth"],
             case["transcript"],
             case["response"],
-            case.get("user_satisfaction", {}),
         )
         for case in cases
     ]
@@ -34,19 +33,15 @@ def main() -> None:
     old_summary = json.loads(summary_path.read_text(encoding="utf-8"))
     passthrough_keys = [
         "provider",
-        "model",
         "agent_type",
         "agent_model",
-        "user_type",
-        "user_set",
         "user_model",
-        "limit",
-        "turns",
+        "difficulty",
+        "users",
+        "index_path",
         "max_turns",
         "completed_cases",
         "stop_reasons",
-        "sim_user",
-        "sim_user_model",
         "jobs",
         "token_usage",
         "simulated_user_diagnostics",
@@ -56,7 +51,7 @@ def main() -> None:
         "simulated_user_diagnostics": old_summary.get("simulated_user_diagnostics")
         or aggregate_simulated_user_diagnostics(cases),
         "summary": aggregate(scores),
-        "scores": scores,
+        "breakdown": aggregate_breakdown(cases),
         "analysis": details,
     }
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -160,12 +155,13 @@ def render_report(summary: dict) -> str:
         "",
         f"- Provider: {summary.get('provider')}",
         f"- Agent type: {summary.get('agent_type', 'unknown')}",
-        f"- Agent model: {summary.get('agent_model', summary.get('model'))}",
-        f"- User type: {summary.get('user_type', summary.get('sim_user', 'unknown'))}",
-        f"- User model: {summary.get('user_model', summary.get('sim_user_model'))}",
+        f"- Agent model: {summary.get('agent_model')}",
+        f"- User model: {summary.get('user_model')}",
+        f"- Difficulty: {summary.get('difficulty', 'all')}",
+        f"- Users: {summary.get('users')}",
+        f"- Index path: {summary.get('index_path')}",
         f"- Cases: {agg.get('cases', 0)}",
-        f"- Tool result limit: {summary.get('limit')}",
-        f"- Max simulated turns: {summary.get('max_turns', summary.get('turns'))}",
+        f"- Max simulated turns: {summary.get('max_turns')}",
         f"- Completed cases: {summary.get('completed_cases', 'n/a')}",
         f"- Stop reasons: {summary.get('stop_reasons', 'n/a')}",
         "",
@@ -174,9 +170,7 @@ def render_report(summary: dict) -> str:
         f"- Ground truth hit rate: {agg.get('ground_truth_hit_rate', 0):.2%}",
         f"- Retrieval ground truth hit rate: {agg.get('retrieval_ground_truth_hit_rate', 0):.2%}",
         f"- Average tool calls per case: {agg.get('average_tool_calls', 0):.2f}",
-        f"- Average satisfaction: {format_optional(agg.get('average_satisfaction'))}/5",
-        f"- Got relevant help rate: {format_optional_percent(agg.get('got_relevant_help_rate'))}",
-        f"- Average actionability: {format_optional(agg.get('average_actionability'))}/5",
+        f"- Average turns per case: {agg.get('average_turns', 0):.2f}",
         f"- Multiple recommendation turns: {agg.get('multiple_recommendation_turn_rate', 0):.2%}",
         f"- Recommended IDs not retrieved: {agg.get('recommended_ids_not_retrieved_rate', 0):.2%}",
         f"- Average total tokens per case: {summary.get('token_usage', {}).get('average_per_case', {}).get('total_tokens', 0):.0f}",
@@ -190,6 +184,7 @@ def render_report(summary: dict) -> str:
                 f"- Trait counts: {diagnostics.get('trait_counts', {})}",
             ]
         )
+    lines.extend(render_breakdown(summary.get("breakdown") or {}))
     lines.extend(
         [
             "## Failure Analysis",
@@ -222,7 +217,6 @@ def render_report(summary: dict) -> str:
             "",
             "## Interpretation",
             "",
-            "- User satisfaction is a simulated-user experience signal, not a replacement for ground-truth resource hits.",
             "- The agent often maps the user's need to a nearby but wrong service category or resource family.",
             "- Final recommendation scoring uses the last agent recommendation with resource IDs before completion.",
             "- Low empty-output rate means failure is mostly semantic ranking and selection, not only no-result recovery.",
@@ -237,6 +231,28 @@ def render_report(summary: dict) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def render_breakdown(breakdown: dict) -> list[str]:
+    lines = []
+    for title, key in [("## By Difficulty", "by_difficulty"), ("## By Trait", "by_trait")]:
+        groups = breakdown.get(key) or {}
+        if not groups:
+            continue
+        lines.extend([title, ""])
+        for group, metrics in groups.items():
+            lines.append(
+                "- "
+                f"{group}: "
+                f"{metrics.get('ground_truth_hits', 0)}/{metrics.get('cases', 0)} "
+                f"({metrics.get('ground_truth_hit_rate', 0):.2%}), "
+                f"retrieval {metrics.get('retrieval_ground_truth_hits', 0)}/{metrics.get('cases', 0)} "
+                f"({metrics.get('retrieval_ground_truth_hit_rate', 0):.2%}), "
+                f"no_match={metrics.get('no_match_count', 0)}, "
+                f"avg_turns={metrics.get('average_turns', 0):.2f}"
+            )
+        lines.append("")
+    return lines
 
 
 def render_failure_paragraph(agg: dict, analysis: dict) -> str:
@@ -254,18 +270,6 @@ def render_failure_paragraph(agg: dict, analysis: dict) -> str:
         "because the agent often chose a nearby but wrong service category/resource family, or retrieved the "
         "right resource but failed to include the exact id in the completed final recommendation."
     )
-
-
-def format_optional(value) -> str:
-    if value is None:
-        return "n/a"
-    return f"{value:.2f}"
-
-
-def format_optional_percent(value) -> str:
-    if value is None:
-        return "n/a"
-    return f"{value:.2%}"
 
 
 def parse_args() -> argparse.Namespace:

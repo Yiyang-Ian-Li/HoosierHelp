@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 
@@ -73,6 +74,11 @@ def schedule_windows(text: object) -> tuple[ScheduleWindow, ...]:
 
 def schedule_windows_from_json(row: dict) -> tuple[ScheduleWindow, ...]:
     raw_windows = row.get("schedule_windows")
+    if isinstance(raw_windows, str) and raw_windows.strip():
+        try:
+            raw_windows = json.loads(raw_windows)
+        except ValueError:
+            raw_windows = None
     if isinstance(raw_windows, list):
         windows = []
         for item in raw_windows:
@@ -81,14 +87,26 @@ def schedule_windows_from_json(row: dict) -> tuple[ScheduleWindow, ...]:
             day = str(item.get("day", "")).lower()
             if day not in DAY_VALUES:
                 continue
-            try:
-                start = int(item.get("start_minute"))
-                end = int(item.get("end_minute"))
-            except (TypeError, ValueError):
+            start = _window_minute(item, "start")
+            end = _window_minute(item, "end")
+            if start is None or end is None:
                 continue
             windows.append(ScheduleWindow(day, start, end))
         return tuple(windows)
     return schedule_windows(row.get("site_schedule", ""))
+
+
+def _window_minute(item: dict, key: str) -> int | None:
+    minute_key = f"{key}_minute"
+    if minute_key in item:
+        try:
+            return int(item.get(minute_key))
+        except (TypeError, ValueError):
+            return None
+    value = str(item.get(key, ""))
+    if key == "end" and value == "24:00":
+        return 24 * 60
+    return parse_24_hour_time(value)
 
 
 def parse_24_hour_time(value: str) -> int | None:
