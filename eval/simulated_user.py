@@ -3,94 +3,77 @@ from __future__ import annotations
 import json
 
 from agent.agent import add_response_usage, empty_token_usage
+from agent.llm import create_response_with_retries
 
 
 TRAIT_INSTRUCTIONS = {
     "normal": (
-        "Be cooperative and realistic. Answer clear questions directly, without extra friction, "
-        "contradiction, hostility, unreasonable demands, or attempts to derail the conversation."
+        "Be cooperative and realistic. Answer the questions clearly and directly."
     ),
     "unreasonable_demand": (
-        "In the opening message, make an extreme, unrealistic demand by exaggerating or distorting your "
-        "real need, while leaving the underlying need recognizable. For example: if you need food, demand "
-        "$100 cash because you are hungry; if you need care, demand someone come to your home and take care "
-        "of you. Keep pushing the demand, but do not switch to an unrelated need."
+        "In follow-up replies, sometimes exaggerate the real need into an unrealistic demand while leaving "
+        "the underlying need recognizable. For example, if you need food, demand cash because you are hungry. "
+        "Keep pushing the demand, but do not switch to an unrelated need."
     ),
     "rambling": (
         "Answer the agent's question, but surround the answer with long side comments and repeatedly try "
-        "to pull the agent into casual chat. Ask off-topic conversational questions or opinions while still "
-        "eventually providing the needed fact. Do not create a new service need."
+        "to pull the agent into casual chat. Keep asking off-topic conversational questions or opinions. "
     ),
     "impatience": (
-        "Do not sound impatient in the opening message. In every later reply, be clearly rude, angry, and "
-        "rushed: complain, demand that the agent hurry up, and show frustration with questions. Still answer "
-        "just enough for the conversation to continue."
+        "In follow-up replies, be clearly rude, angry, and rushed: complain, demand that the agent hurry up, "
+        "and show frustration with questions. Still answer just enough for the conversation to continue."
     ),
     "incomplete_answer": (
-        "In the opening message, only say what kind of service you need; do not reveal location, intake, "
-        "schedule, or document facts even if they are in known_facts. When the agent asks for one of those "
-        "facts, give an unclear or incomplete answer the first time. If the agent asks again about the same "
-        "fact, answer clearly from known_facts. Do this at most twice total, then answer normally."
+        "When the agent asks for a fact, give an unclear or incomplete answer the first time. If the "
+        "agent asks again about the same fact, answer clearly from the hidden facts."
     ),
     "inconsistency": (
         "Give a plainly contradictory answer about a fact the first time it is asked, so the agent cannot "
-        "tell which fact is true. If the agent asks again about that fact, answer correctly from known_facts. "
-        "Do this at most twice total, then answer normally. Keep the core service need recognizable."
+        "tell which fact is true. If the agent asks again about that fact, answer correctly from hidden facts. "
     ),
 }
 
 SIMULATED_USER_CARD_FIELDS = {
     "case_id",
     "user_id",
-    "difficulty",
+    "case_type",
     "traits",
-    "need_summary",
+    "opening",
     "profile",
-    "known_facts",
+    "location",
+    "location_requirement",
+    "needs",
 }
 
 LLM_USER_INSTRUCTIONS = """
 You are simulating a real person seeking help from Indiana 211.
 
-You must follow the hidden user profile. The hidden profile describes the 
-user's own situation. The user knows their own background, need, location,
-household, urgency, and constraints.
+You must follow the hidden user profile. The hidden profile describes the
+user's own situation. The user knows their own background, needs, location,
+household, urgency, and hidden constraints.
 
-The `need_summary` is your real service need in natural language. Express this
-need in your own words; do not invent a different service need.
+The hidden `location_requirement` is fixed truth. Each item in hidden `needs`
+has a plain-language need summary and its own firm schedule requirement.
 
-The `known_facts` list is fixed truth for constraints. Location and intake facts
-are firm requirements. If known_facts includes a schedule requirement, that
-schedule is firm; if it does not, you have no schedule constraint. If
-known_facts includes `documents_available`, those are the only documents you can
-provide; if it says `documents_available: none`, you cannot currently provide
-documents. If documents_available is absent, do not invent or volunteer a
-document limitation.
-If the agent asks about a constraint not present in `known_facts`, answer
-naturally that you have no special requirement, are flexible, or are not sure,
-as appropriate.
+When the agent asks about location or where resources should be searched, state
+your own location information naturally and your `location_requirement` clearly.
+However, if your trait defines a reply style, prioritize that style when responding.
 
-Speak casually and naturally, like a real person asking for help. Use plain,
-conversational wording instead of structured lists or form-like phrasing.
+If the agent asks about a constraint not present in the hidden facts, answer
+naturally that you have no special requirement.
 
-In the opening message, express the service need and a little natural
-context. Never reveal all known_facts in the opening message. Mention at most
-the service need from need_summary and one other known fact in the opening,
-unless your trait says to reveal less.
+For composite cases, keep the needs separate. If the agent asks for schedule or
+availability, give the schedule for the specific need being asked about. If the
+agent asks broadly, give each need's schedule separately. Do not merge the two
+schedules into one shared availability.
 
-Follow the listed trait definition while keeping the underlying need and
-identity consistent.
+Speak casually and naturally, like a real person asking for help. However,
+prioritize adjusting your wording to align with the trait definition while
+keeping the underlying need and identity consistent.
 
 Do not create unrelated new service needs, errands, or tasks beyond the hidden
-profile. 
-""".strip()
+profile.
 
-OPENING_PROMPT = """
-Start the conversation with the 211 agent.
-
-In this opening message, do not reveal all known_facts. Mention the service need
-from need_summary with natural context, and at most one other known fact. If
-your trait gives a stricter opening rule, follow the trait.
 """.strip()
 
 
@@ -103,7 +86,7 @@ class LLMSimulatedUser:
         self.token_usage = empty_token_usage()
 
     def opening(self) -> str:
-        reply = self._call_user_model(OPENING_PROMPT)
+        reply = str(self.card.get("opening", "")).strip()
         self.history.append({"role": "assistant", "content": reply})
         return reply
 
@@ -119,7 +102,8 @@ class LLMSimulatedUser:
         extra = []
         if not self.history or self.history[-1].get("content") != agent_text:
             extra = [{"role": "user", "content": agent_text}]
-        response = self.client.responses.create(
+        response = create_response_with_retries(
+            self.client,
             model=self.model,
             instructions=LLM_USER_INSTRUCTIONS,
             input=self._messages(extra=extra),

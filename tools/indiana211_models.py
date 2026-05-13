@@ -24,6 +24,10 @@ class Resource:
     intake_methods: tuple[str, ...] = ()
     document_requirements: tuple[str, ...] = ()
 
+    @property
+    def resource_name(self) -> str:
+        return self.service_name
+
 
 @dataclass(frozen=True)
 class SearchRequest:
@@ -31,11 +35,7 @@ class SearchRequest:
     cities: tuple[str, ...] = ()
     zipcodes: tuple[str, ...] = ()
     service_categories: tuple[str, ...] = ()
-    available_days: tuple[str, ...] = ()
-    available_time_windows: tuple[dict, ...] = ()
-    requires_24_hours: bool = False
-    intake_methods: tuple[str, ...] = ()
-    documents_available: tuple[str, ...] = ()
+    schedule: dict = field(default_factory=dict)
     limit: int = 10
 
 

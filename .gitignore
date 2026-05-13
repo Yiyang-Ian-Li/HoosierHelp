@@ -3,6 +3,7 @@
 data/indiana211/indiana211_resources_raw_all_counties.json
 tests/
 experiments/
+paper/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

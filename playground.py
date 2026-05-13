@@ -18,7 +18,6 @@ CONFIG = {
     "index_path": "data/benchmark/filtered_resources_tagged.csv",
     "agent_type": "default",  # "default" or "react"
     "agent_model": "gpt-4.1-mini",
-    "difficulty": "easy",
     "query": "I need a food pantry in Marion County.",
     "limit": 10,
 }
@@ -31,11 +30,11 @@ def main() -> None:
     agent = Agent(
         client=client,
         model=CONFIG["agent_model"],
-        tools=[search_resources_tool_schema(index, difficulty=CONFIG["difficulty"])],
+        tools=[search_resources_tool_schema(index)],
         tool_functions={
             "search_resources": lambda args, limit: execute_search_resources(index, args, limit)
         },
-        instructions=agent_instructions(CONFIG["agent_type"], difficulty=CONFIG["difficulty"]),
+        instructions=agent_instructions(CONFIG["agent_type"]),
     )
 
     started = time.time()
@@ -45,7 +44,6 @@ def main() -> None:
     print(f"Loaded {len(index.resources)} resources")
     print(f"Agent type: {CONFIG['agent_type']}")
     print(f"Agent model: {CONFIG['agent_model']}")
-    print(f"Difficulty protocol: {CONFIG['difficulty']}")
     print(f"Query: {CONFIG['query']}")
     print(f"Finished in {elapsed:.1f}s")
     print()

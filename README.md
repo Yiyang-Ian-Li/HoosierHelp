@@ -5,13 +5,13 @@ Local resource search agent for Indiana 211 data.
 Run evaluation by editing `CONFIG` in `main.py`, then executing:
 
 ```bash
-python3 main.py
+uv run python main.py
 ```
 
 For a single ad hoc query, edit `CONFIG` in `playground.py` and run:
 
 ```bash
-python3 playground.py
+uv run python playground.py
 ```
 
 By default this uses the OpenAI Responses API:
@@ -44,9 +44,9 @@ data/benchmark/filtered_resources_raw.csv
 data/benchmark/filtered_resources_tagged.csv
 ```
 
-`case_specs.json` includes the deterministic source data and singleton
-`ground_truth_resource_ids`. `user_cards.json` is generated from those specs for LLM
-simulated eval.
+`case_specs.json` includes the deterministic source data, single/composite
+needs, and one or two `ground_truth_resource_ids`. `user_cards.json` is
+generated from those specs for LLM simulated eval.
 
 Experiment outputs live outside `data/`:
 
@@ -67,9 +67,9 @@ tools/indiana211.py
 eval/agent_instructions.py
 eval/run_eval.py
 eval/analyze_run.py
-data/benchmark_builder/0_resource_filter.py
-data/benchmark_builder/1_build_user_specs.py
-data/benchmark_builder/2_build_user_cards.py
+data/benchmark_builder/resource_filter.py
+data/benchmark_builder/build_user_specs.py
+data/benchmark_builder/build_user_cards.py
 ```
 
 `agent/agent.py` is a generic Responses API function-calling loop. It receives
@@ -80,71 +80,68 @@ Benchmark-specific agent instructions live in `eval/agent_instructions.py`.
 `tools/indiana211.py` exposes the Indiana 211 `search_resources` tool, with
 models, tag parsing, and schedule parsing split into adjacent helper modules.
 The default tool index is `data/benchmark/filtered_resources_tagged.csv`.
-County, city, ZIP, service category, intake, schedule, and document fields are
-all hard filters when provided. Missing or `none` document data is treated as no
-concrete document requirement.
-Schedule filtering uses natural fields such as `available_days`,
-`available_time_windows`, and `requires_24_hours`; the old `schedule_tags`
-filter is intentionally not kept.
+County, city, ZIP, service category, and schedule fields are hard filters when
+provided. Intake methods and document requirements are returned for the final
+recommendation but are not search filters. Schedule filtering uses one
+`schedule` object with either `{day, time}` or `{requires_24_hours: true}`.
 
-Eval uses three difficulty-specific protocols. Easy exposes only service, one
-location field, and intake. Medium adds schedule fields. Hard adds document
-availability. The search backend is shared; the tool schema and agent
-instruction are selected per case difficulty.
+Benchmark cases are now generated as `single` or `composite`. A single case has
+one service need, one schedule requirement, and one location requirement. A
+composite case has two service needs with separate non-overlapping schedule
+requirements and a shared location. Ground truth resources include the intake
+methods and document requirements the final answer should report.
 
 ## LLM Simulated Eval
 
 Generate or refresh deterministic case specs:
 
 ```bash
-.venv/bin/python data/benchmark_builder/1_build_user_specs.py --easy 50 --medium 100 --hard 50
+uv run python data/benchmark_builder/build_user_specs.py --single 150 --composite 150
 ```
 
 Generate LLM simulated-user cards from the case specs:
 
 ```bash
-.venv/bin/python data/benchmark_builder/2_build_user_cards.py --model gpt-4.1-mini
+uv run python data/benchmark_builder/build_user_cards.py --model openai/gpt-4.1
 ```
 
 Resource and user-spec distribution notebooks:
 
 ```text
-data/benchmark_builder/0_1_resources_stat.ipynb
-data/benchmark_builder/1_1_user_stat.ipynb
+data/benchmark_builder/analysis/resources_stat.ipynb
+data/benchmark_builder/analysis/user_stat.ipynb
 ```
 
 Run an OpenAI evaluation with an LLM simulated user:
 
 ```bash
-python3 main.py
+uv run python main.py
 ```
 
 `main.py` is the eval entrypoint. Its `CONFIG` controls provider, agent
 type/model, user model, data paths, turn limit, and parallel jobs.
-Set `difficulty` to `easy`, `medium`, or `hard` to run one protocol, or `all`
-to run all cases with per-case protocols. The same option is available from the
-CLI:
+Set `case_type` to `single`, `composite`, or `all` in `main.py`. The same
+option is available from the CLI:
 
 ```bash
-python3 -m eval.run_eval --difficulty easy
-python3 -m eval.run_eval --difficulty medium
-python3 -m eval.run_eval --difficulty hard
+uv run python -m eval.run_eval --case-type single
+uv run python -m eval.run_eval --case-type composite
 ```
 
-Eval stops on the first agent message that includes a concrete resource ID
-(`in211-...`). That message is treated as the agent's single final
-recommendation. Before that point, the agent may ask follow-up questions and
-make one tool call, but should not cite resource IDs tentatively.
-Retrieval metrics still read tool results.
+Eval stops on the first agent message that contains valid final JSON with a
+`recommendations` list. The agent may ask follow-up questions and can execute
+up to three real tool calls per case. ID hit scoring uses the first three final
+recommendations; intake methods and document requirements are tracked as
+auxiliary detail metrics. Retrieval metrics read tool results.
 
 Analyze an existing run:
 
 ```bash
-python3 -m eval.analyze_run experiments/<run-id>
+uv run python -m eval.analyze_run experiments/<run-id>
 ```
 
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests
+uv run python -m unittest discover -s tests
 ```

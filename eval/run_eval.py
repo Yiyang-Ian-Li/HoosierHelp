@@ -13,21 +13,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent import Agent
 from agent.llm import load_dotenv, make_openai_client
+from eval.analyze_run import analyze_run_dir
 from eval.agent_instructions import agent_instructions
-from eval.metrics import aggregate, aggregate_breakdown, score_case
 from eval.simulated_user import LLMSimulatedUser
 from tools.indiana211 import execute_search_resources, load_resource_index, search_resources_tool_schema
 
 
 DEFAULT_USERS = Path("data/benchmark/user_cards.json")
 DEFAULT_OUTPUT_DIR = Path("experiments")
+MAX_RECOMMENDATIONS_FOR_SCORING = 3
+MAX_TOOL_CALLS = 3
 
 
 def run(args: argparse.Namespace) -> Path:
     load_dotenv()
     users = json.loads(args.users.read_text(encoding="utf-8"))
-    if args.difficulty != "all":
-        users = [card for card in users if card.get("difficulty") == args.difficulty]
+    if args.case_type != "all":
+        users = [card for card in users if card.get("case_type") == args.case_type]
     ground_truth_by_case = load_ground_truth_from_cards(users)
     if args.limit_users:
         users = users[: args.limit_users]
@@ -49,19 +51,17 @@ def run(args: argparse.Namespace) -> Path:
         flush=True,
     )
     cases = []
-    scores = []
     if args.jobs == 1:
         for idx, card in enumerate(users, start=1):
             print(f"[{idx}/{len(users)}] start {card['user_id']} {card_label(card, ground_truth_by_case)}", flush=True)
             case = run_case_for_card(args, index, card, ground_truth_by_case[case_id(card)])
             print(
                 f"[{idx}/{len(users)}] done {card['user_id']} "
-                f"stop={case['stop_reason']} hit={case['score']['ground_truth_hit']} "
-                f"turns={case['score']['turn_count']} tools={case['score']['tool_call_count']}",
+                f"stop={case['stop_reason']} "
+                f"turns={case_turn_count(case)} tools={case_tool_call_count(case)}",
                 flush=True,
             )
             cases.append(case)
-            scores.append(case["score"])
             write_json(conversations_dir / f"{card['user_id']}.json", case)
     else:
         with ThreadPoolExecutor(max_workers=args.jobs) as executor:
@@ -79,55 +79,45 @@ def run(args: argparse.Namespace) -> Path:
                 case = future.result()
                 print(
                     f"[{idx}/{len(users)}] done {card['user_id']} "
-                    f"stop={case['stop_reason']} hit={case['score']['ground_truth_hit']} "
-                    f"turns={case['score']['turn_count']} tools={case['score']['tool_call_count']}",
+                    f"stop={case['stop_reason']} "
+                    f"turns={case_turn_count(case)} tools={case_tool_call_count(case)}",
                     flush=True,
                 )
                 cases.append(case)
-                scores.append(case["score"])
                 write_json(conversations_dir / f"{card['user_id']}.json", case)
     cases.sort(key=lambda case: case["card"]["user_id"])
-    scores = [case["score"] for case in cases]
-    summary = {
+    run_metadata = {
         "provider": args.provider,
         "agent_type": args.agent_type,
         "agent_model": args.agent_model,
         "user_model": args.user_model,
-        "difficulty": args.difficulty,
+        "case_type": args.case_type,
         "users": str(args.users),
         "index_path": str(args.index_path),
         "jobs": args.jobs,
         "max_turns": args.max_turns,
-        "completed_cases": sum(1 for case in cases if case["completed"]),
-        "stop_reasons": {
-            reason: sum(1 for case in cases if case["stop_reason"] == reason)
-            for reason in sorted({case["stop_reason"] for case in cases})
-        },
-        "token_usage": aggregate_token_usage(cases),
-        "simulated_user_diagnostics": aggregate_simulated_user_diagnostics(cases),
-        "summary": aggregate(scores),
-        "breakdown": aggregate_breakdown(cases),
     }
-    write_json(output_dir / "summary.json", summary)
-    (output_dir / "report.md").write_text(render_report(summary), encoding="utf-8")
-    print(f"Wrote {output_dir / 'summary.json'}")
-    print(f"Wrote {output_dir / 'report.md'}")
+    write_json(output_dir / "run.json", run_metadata)
+    print(f"Wrote {output_dir / 'run.json'}")
+    analyze_run_dir(output_dir)
     return output_dir
 
 
 def run_case_for_card(args, index, card: dict, ground_truth: dict) -> dict:
     client = make_openai_client(args.provider)
-    difficulty = card.get("difficulty")
-    tools = [search_resources_tool_schema(index, difficulty=difficulty)]
+    tools = [search_resources_tool_schema(index)]
     agent = Agent(
         client=client,
         model=args.agent_model,
         tools=tools,
         tool_functions={"search_resources": lambda tool_args, limit: execute_search_resources(index, tool_args)},
-        instructions=agent_instructions(args.agent_type, difficulty=difficulty),
+        instructions=agent_instructions(args.agent_type),
+        max_tool_calls=MAX_TOOL_CALLS,
     )
     simulated_user = LLMSimulatedUser(card, make_openai_client(args.provider), args.user_model)
     return run_case(agent, simulated_user, card, ground_truth, args.max_turns)
+
+
 
 
 def load_ground_truth_from_cards(users: list[dict]) -> dict[str, dict]:
@@ -136,7 +126,10 @@ def load_ground_truth_from_cards(users: list[dict]) -> dict[str, dict]:
             "case_id": case_id(card),
             "user_id": card.get("user_id", case_id(card)),
             "ground_truth_resource_ids": card.get("ground_truth_resource_ids", []),
+            "ground_truth_resources": card.get("ground_truth_resources", []),
             "target_service_categories": card.get("target_service_categories", []),
+            "location_requirement": card.get("location_requirement") or card.get("case_spec", {}).get("location_requirement", {}),
+            "needs": card.get("case_spec", {}).get("needs", []),
         }
         for card in users
     }
@@ -167,8 +160,7 @@ def run_case(agent: Agent, simulated_user, card: dict, ground_truth: dict, max_t
         final_response = agent.ask(user_message, history=history, limit=None)
         add_token_usage(agent_token_usage, final_response.get("token_usage", {}))
         agent_text = final_response["output_text"]
-        tool_used = response_has_tool_call(final_response)
-        structured_result = parse_agent_result(agent_text, tool_used=tool_used)
+        structured_result = parse_agent_result(agent_text)
         final_response["structured_result"] = structured_result
         completed = structured_result["completed"]
         transcript.append({"role": "agent", "content": agent_text})
@@ -195,54 +187,89 @@ def run_case(agent: Agent, simulated_user, card: dict, ground_truth: dict, max_t
         "stop_reason": stop_reason,
         "simulated_user_diagnostics": getattr(simulated_user, "diagnostics", lambda: {})(),
         "token_usage": token_usage,
-        "score": score_case(card, ground_truth, transcript, final_response),
     }
+
+
+def case_turn_count(case: dict) -> int:
+    return len([turn for turn in case.get("transcript", []) if turn.get("role") == "user"])
+
+
+def case_tool_call_count(case: dict) -> int:
+    return len(case.get("response", {}).get("tool_calls", ()))
 
 
 def completion_flag(agent_text: str) -> bool:
     return parse_agent_result(agent_text).get("completed") is True
 
 
-def parse_agent_result(agent_text: str, tool_used: bool = False) -> dict:
-    recommended = _extract_recommended_ids(agent_text)
-    if recommended:
-        return _agent_result("recommended", recommended)
-    if tool_used:
-        return _agent_result("no_match")
-    return _agent_result("continue")
+def parse_agent_result(agent_text: str) -> dict:
+    parsed = parse_final_recommendation_json(agent_text)
+    if parsed is None:
+        return _agent_result("continue", final_json_valid=False)
+    recommended = recommended_ids_from_final_json(parsed)
+    if parsed.get("recommendations"):
+        return _agent_result("recommended", recommended, final_json=parsed, final_json_valid=True)
+    return _agent_result("no_match", final_json=parsed, final_json_valid=True)
 
 
-def _agent_result(status: str, recommended: list[str] | None = None) -> dict:
+def _agent_result(
+    status: str,
+    recommended: list[str] | None = None,
+    final_json: dict | None = None,
+    final_json_valid: bool = False,
+) -> dict:
     recommended = recommended or []
     return {
         "status": status,
         "completed": status in {"recommended", "no_match"},
         "recommended_resource_ids": recommended,
+        "final_json": final_json,
+        "final_json_valid": final_json_valid,
     }
 
 
-def _extract_recommended_ids(agent_text: str) -> list[str]:
+def parse_final_recommendation_json(agent_text: str) -> dict | None:
+    import json
+
+    text = strip_react_prefix(agent_text).strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    recommendations = parsed.get("recommendations")
+    if not isinstance(recommendations, list):
+        return None
+    for item in recommendations:
+        if not isinstance(item, dict):
+            return None
+        if not isinstance(item.get("resource_id"), str) or not item["resource_id"].strip():
+            return None
+        if not isinstance(item.get("resource_name"), str) or not item["resource_name"].strip():
+            return None
+        for key in ("intake_methods", "document_requirements"):
+            if not isinstance(item.get(key), list) or not all(isinstance(value, str) for value in item[key]):
+                return None
+    return parsed
+
+
+def strip_react_prefix(text: str) -> str:
+    marker = "Answer:"
+    if marker in text:
+        return text.split(marker, 1)[1]
+    return text
+
+
+def recommended_ids_from_final_json(parsed: dict) -> list[str]:
     ids = []
-    for match in re.finditer(r"\bin211-[a-z0-9]+(?:-[a-z0-9]+)*\b", agent_text.lower()):
-        resource_id = match.group(0)
+    for item in (parsed.get("recommendations") or [])[:MAX_RECOMMENDATIONS_FOR_SCORING]:
+        resource_id = str(item.get("resource_id", "")).strip().lower()
+        if not re.fullmatch(r"in211-[a-z0-9]+(?:-[a-z0-9]+)*", resource_id):
+            continue
         if resource_id not in ids:
             ids.append(resource_id)
     return ids
-
-
-def response_has_tool_call(response: dict) -> bool:
-    if response.get("tool_calls"):
-        return True
-    return any(
-        _response_item_get(item, "type") == "function_call"
-        for item in response.get("input", [])
-    )
-
-
-def _response_item_get(item, key: str):
-    if isinstance(item, dict):
-        return item.get(key)
-    return getattr(item, key, None)
 
 
 def add_token_usage(total: dict, item: dict) -> None:
@@ -255,46 +282,6 @@ def combine_token_usage(*items: dict) -> dict:
     for item in items:
         add_token_usage(total, item)
     return total
-
-
-def aggregate_token_usage(cases: list[dict]) -> dict:
-    total = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-    agent = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-    simulated_user = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-    for case in cases:
-        usage = case.get("token_usage", {})
-        add_token_usage(total, usage.get("total", {}))
-        add_token_usage(agent, usage.get("agent", {}))
-        add_token_usage(simulated_user, usage.get("simulated_user", {}))
-    count = len(cases) or 1
-    return {
-        "total": total,
-        "agent": agent,
-        "simulated_user": simulated_user,
-        "average_per_case": {
-            key: value / count
-            for key, value in total.items()
-        },
-        "average_agent_per_case": {
-            key: value / count
-            for key, value in agent.items()
-        },
-        "average_simulated_user_per_case": {
-            key: value / count
-            for key, value in simulated_user.items()
-        },
-    }
-
-
-def aggregate_simulated_user_diagnostics(cases: list[dict]) -> dict:
-    trait_counts = {}
-    for case in cases:
-        diagnostics = case.get("simulated_user_diagnostics") or {}
-        for trait in diagnostics.get("traits") or []:
-            trait_counts[trait] = trait_counts.get(trait, 0) + 1
-    return {
-        "trait_counts": trait_counts,
-    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -310,7 +297,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit-users", type=int, default=0)
     parser.add_argument("--max-turns", type=int, default=8)
     parser.add_argument("--agent-type", choices=["default", "react"], default="default")
-    parser.add_argument("--difficulty", choices=["all", "easy", "medium", "hard"], default="all")
+    parser.add_argument("--case-type", choices=["all", "single", "composite"], default="all")
     parser.add_argument("--jobs", type=int, default=8)
     return parser.parse_args()
 
@@ -319,8 +306,8 @@ def experiment_name(args: argparse.Namespace, case_count: int) -> str:
     timestamp = time.strftime("%Y%m%d-%H%M")
     agent_part = f"{slug(args.agent_type)}-{slug(args.agent_model)}"
     user_part = f"{user_set_name(args.users)}-{slug(args.user_model)}"
-    difficulty_part = "" if args.difficulty == "all" else f"_{args.difficulty}"
-    return f"{timestamp}_{agent_part}_{user_part}{difficulty_part}_n{case_count}"
+    case_type_part = "" if args.case_type == "all" else f"_{args.case_type}"
+    return f"{timestamp}_{agent_part}_{user_part}{case_type_part}_n{case_count}"
 
 
 def user_set_name(users_path: Path) -> str:
@@ -352,59 +339,6 @@ def jsonable(value):
     if hasattr(value, "__dict__") and not isinstance(value, type):
         return jsonable(value.__dict__)
     return value
-
-
-def render_report(summary: dict) -> str:
-    agg = summary["summary"]
-    lines = [
-        "# Simulated User Evaluation Report",
-        "",
-        f"- Provider: {summary['provider']}",
-        f"- Agent type: {summary.get('agent_type')}",
-        f"- Agent model: {summary.get('agent_model')}",
-        f"- Difficulty: {summary.get('difficulty', 'all')}",
-        f"- Users: {summary.get('users')}",
-        f"- User model: {summary.get('user_model')}",
-        f"- Cases: {agg.get('cases', 0)}",
-        f"- Ground truth hit rate: {agg.get('ground_truth_hit_rate', 0):.2%}",
-        f"- Retrieval ground truth hit rate: {agg.get('retrieval_ground_truth_hit_rate', 0):.2%}",
-        f"- Average tool calls: {agg.get('average_tool_calls', 0):.2f}",
-        f"- Average turns: {agg.get('average_turns', 0):.2f}",
-        f"- Multiple recommendation turns: {agg.get('multiple_recommendation_turn_rate', 0):.2%}",
-        f"- Recommended IDs not retrieved: {agg.get('recommended_ids_not_retrieved_rate', 0):.2%}",
-        f"- Average total tokens per case: {summary.get('token_usage', {}).get('average_per_case', {}).get('total_tokens', 0):.0f}",
-        f"- Completed cases: {summary.get('completed_cases', 0)}",
-    ]
-    lines.extend(render_breakdown(summary.get("breakdown") or {}))
-    diagnostics = summary.get("simulated_user_diagnostics") or {}
-    if diagnostics:
-        lines.extend(
-            [
-                f"- Trait counts: {diagnostics.get('trait_counts', {})}",
-            ]
-        )
-    return "\n".join(lines)
-
-
-def render_breakdown(breakdown: dict) -> list[str]:
-    lines = []
-    for title, key in [("By difficulty", "by_difficulty"), ("By trait", "by_trait")]:
-        groups = breakdown.get(key) or {}
-        if not groups:
-            continue
-        lines.extend(["", title + ":"])
-        for group, metrics in groups.items():
-            lines.append(
-                "- "
-                f"{group}: "
-                f"{metrics.get('ground_truth_hits', 0)}/{metrics.get('cases', 0)} "
-                f"({metrics.get('ground_truth_hit_rate', 0):.2%}), "
-                f"retrieval {metrics.get('retrieval_ground_truth_hits', 0)}/{metrics.get('cases', 0)} "
-                f"({metrics.get('retrieval_ground_truth_hit_rate', 0):.2%}), "
-                f"no_match={metrics.get('no_match_count', 0)}, "
-                f"avg_turns={metrics.get('average_turns', 0):.2f}"
-            )
-    return lines
 
 
 if __name__ == "__main__":

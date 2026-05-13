@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import json
 
-MAX_TOOL_ROUNDS = 1
-
+from agent.llm import create_response_with_retries
 
 class Agent:
     def __init__(
@@ -13,12 +12,15 @@ class Agent:
         tools: list[dict],
         tool_functions: dict,
         instructions: str,
+        max_tool_calls: int = 1,
     ):
         self.client = client
         self.model = model
         self.tools = tools
         self.tool_functions = tool_functions
         self.instructions = instructions
+        self.max_tool_calls = max_tool_calls
+        self.executed_tool_calls = 0
 
     def ask(
         self,
@@ -30,11 +32,11 @@ class Agent:
         input_list.append({"role": "user", "content": query})
         tool_calls = []
         output_text = ""
-        executed_tool_rounds = 0
         token_usage = empty_token_usage()
 
         while True:
-            response = self.client.responses.create(
+            response = create_response_with_retries(
+                self.client,
                 model=self.model,
                 instructions=self.instructions,
                 tools=self.tools,
@@ -48,7 +50,7 @@ class Agent:
 
             if not function_calls:
                 break
-            if executed_tool_rounds >= MAX_TOOL_ROUNDS:
+            if self.executed_tool_calls >= self.max_tool_calls:
                 for item in function_calls:
                     input_list.append(
                         {
@@ -57,14 +59,15 @@ class Agent:
                             "output": json.dumps(
                                 {
                                     "error": (
-                                        "Maximum tool rounds reached. Stop calling tools and "
+                                        "Maximum tool calls reached. Stop calling tools and "
                                         "answer from the information already available."
                                     )
                                 }
                             ),
                         }
                     )
-                response = self.client.responses.create(
+                response = create_response_with_retries(
+                    self.client,
                     model=self.model,
                     instructions=self.instructions,
                     input=input_list,
@@ -76,7 +79,7 @@ class Agent:
                 break
 
             for index, item in enumerate(function_calls):
-                if index > 0:
+                if self.executed_tool_calls >= self.max_tool_calls:
                     input_list.append(
                         {
                             "type": "function_call_output",
@@ -84,7 +87,7 @@ class Agent:
                             "output": json.dumps(
                                 {
                                     "error": (
-                                        "Only one tool call is allowed. Stop calling tools and "
+                                        "Maximum tool calls reached. Stop calling tools and "
                                         "answer from the information already available."
                                     )
                                 }
@@ -96,6 +99,7 @@ class Agent:
                 args = _json_object(_item_attr(item, "arguments") or "{}")
                 result = self.tool_functions[name](args, limit)
                 tool_calls.append({"tool": name, "arguments": args, "result": result})
+                self.executed_tool_calls += 1
                 input_list.append(
                     {
                         "type": "function_call_output",
@@ -103,8 +107,6 @@ class Agent:
                         "output": _tool_output_text(result),
                     }
                 )
-            executed_tool_rounds += 1
-
         return {
             "query": query,
             "output_text": output_text,
@@ -133,25 +135,9 @@ def _json_object(value: str) -> dict:
 
 
 def _tool_output_text(result: object) -> str:
-    result = _with_empty_result_guidance(result)
     if isinstance(result, str):
         return result
     return json.dumps(result, ensure_ascii=False)
-
-
-def _with_empty_result_guidance(result: object) -> object:
-    if not isinstance(result, dict):
-        return result
-    resources = result.get("resources")
-    if resources != []:
-        return result
-    return {
-        **result,
-        "retry_guidance": (
-            "No resources matched this exact query. You have already used the single "
-            "allowed tool call; explain that no exact match was found."
-        ),
-    }
 
 
 def empty_token_usage() -> dict:
