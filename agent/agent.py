@@ -97,9 +97,17 @@ class Agent:
                     continue
                 name = _item_attr(item, "name")
                 args = _json_object(_item_attr(item, "arguments") or "{}")
-                result = self.tool_functions[name](args, limit)
+                if name not in self.tool_functions:
+                    result = {
+                        "error": (
+                            f"Unknown tool '{name}'. Use one of the provided tools, "
+                            "or stop calling tools and answer with the final JSON."
+                        )
+                    }
+                else:
+                    result = self.tool_functions[name](args, limit)
+                    self.executed_tool_calls += 1
                 tool_calls.append({"tool": name, "arguments": args, "result": result})
-                self.executed_tool_calls += 1
                 input_list.append(
                     {
                         "type": "function_call_output",

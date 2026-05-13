@@ -4,7 +4,6 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
-import re
 import sys
 import time
 from pathlib import Path
@@ -15,13 +14,19 @@ from agent import Agent
 from agent.llm import load_dotenv, make_openai_client
 from eval.analyze_run import analyze_run_dir
 from eval.agent_instructions import agent_instructions
+from eval.metrics import (
+    count_function_calls,
+    parse_final_json as parse_recommendation_json,
+    parse_final_json_mode,
+    parse_strict_final_json,
+    recommended_ids_from_final_json as metric_recommended_ids_from_final_json,
+)
 from eval.simulated_user import LLMSimulatedUser
 from tools.indiana211 import execute_search_resources, load_resource_index, search_resources_tool_schema
 
 
 DEFAULT_USERS = Path("data/benchmark/user_cards.json")
 DEFAULT_OUTPUT_DIR = Path("experiments")
-MAX_RECOMMENDATIONS_FOR_SCORING = 3
 MAX_TOOL_CALLS = 3
 
 
@@ -195,7 +200,7 @@ def case_turn_count(case: dict) -> int:
 
 
 def case_tool_call_count(case: dict) -> int:
-    return len(case.get("response", {}).get("tool_calls", ()))
+    return count_function_calls(case.get("response", {}))
 
 
 def completion_flag(agent_text: str) -> bool:
@@ -203,13 +208,28 @@ def completion_flag(agent_text: str) -> bool:
 
 
 def parse_agent_result(agent_text: str) -> dict:
-    parsed = parse_final_recommendation_json(agent_text)
+    parsed = parse_recommendation_json(agent_text)
     if parsed is None:
         return _agent_result("continue", final_json_valid=False)
-    recommended = recommended_ids_from_final_json(parsed)
+    recommended = metric_recommended_ids_from_final_json(parsed)
+    strict_valid = parse_strict_final_json(agent_text) is not None
+    parse_mode = parse_final_json_mode(agent_text)
     if parsed.get("recommendations"):
-        return _agent_result("recommended", recommended, final_json=parsed, final_json_valid=True)
-    return _agent_result("no_match", final_json=parsed, final_json_valid=True)
+        return _agent_result(
+            "recommended",
+            recommended,
+            final_json=parsed,
+            final_json_valid=True,
+            final_json_strict_valid=strict_valid,
+            final_json_parse_mode=parse_mode,
+        )
+    return _agent_result(
+        "no_match",
+        final_json=parsed,
+        final_json_valid=True,
+        final_json_strict_valid=strict_valid,
+        final_json_parse_mode=parse_mode,
+    )
 
 
 def _agent_result(
@@ -217,6 +237,8 @@ def _agent_result(
     recommended: list[str] | None = None,
     final_json: dict | None = None,
     final_json_valid: bool = False,
+    final_json_strict_valid: bool = False,
+    final_json_parse_mode: str = "none",
 ) -> dict:
     recommended = recommended or []
     return {
@@ -225,51 +247,9 @@ def _agent_result(
         "recommended_resource_ids": recommended,
         "final_json": final_json,
         "final_json_valid": final_json_valid,
+        "final_json_strict_valid": final_json_strict_valid,
+        "final_json_parse_mode": final_json_parse_mode,
     }
-
-
-def parse_final_recommendation_json(agent_text: str) -> dict | None:
-    import json
-
-    text = strip_react_prefix(agent_text).strip()
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    recommendations = parsed.get("recommendations")
-    if not isinstance(recommendations, list):
-        return None
-    for item in recommendations:
-        if not isinstance(item, dict):
-            return None
-        if not isinstance(item.get("resource_id"), str) or not item["resource_id"].strip():
-            return None
-        if not isinstance(item.get("resource_name"), str) or not item["resource_name"].strip():
-            return None
-        for key in ("intake_methods", "document_requirements"):
-            if not isinstance(item.get(key), list) or not all(isinstance(value, str) for value in item[key]):
-                return None
-    return parsed
-
-
-def strip_react_prefix(text: str) -> str:
-    marker = "Answer:"
-    if marker in text:
-        return text.split(marker, 1)[1]
-    return text
-
-
-def recommended_ids_from_final_json(parsed: dict) -> list[str]:
-    ids = []
-    for item in (parsed.get("recommendations") or [])[:MAX_RECOMMENDATIONS_FOR_SCORING]:
-        resource_id = str(item.get("resource_id", "")).strip().lower()
-        if not re.fullmatch(r"in211-[a-z0-9]+(?:-[a-z0-9]+)*", resource_id):
-            continue
-        if resource_id not in ids:
-            ids.append(resource_id)
-    return ids
 
 
 def add_token_usage(total: dict, item: dict) -> None:

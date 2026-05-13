@@ -26,7 +26,7 @@ Final-answer protocol:
 - submit the final answer after the required search call or calls
 - the final answer must be strict JSON only
 
-Required JSON schema:
+Required JSON schema for the final answer:
 {
   "recommendations": [
     {
@@ -39,7 +39,7 @@ Required JSON schema:
 }
 
 JSON requirements:
-- if no suitable resources are found, output {"recommendations": []}
+- if no suitable resources are found finally, output {"recommendations": []}
 - include up to three recommendations
 - copy resource_name exactly from the selected tool result
 - copy resource_id exactly from the selected tool result

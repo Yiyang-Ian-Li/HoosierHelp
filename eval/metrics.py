@@ -6,6 +6,7 @@ import re
 
 RESOURCE_ID_RE = re.compile(r"\bin211-[a-z0-9]+(?:-[a-z0-9]+)*\b", re.IGNORECASE)
 MAX_RECOMMENDATIONS_FOR_SCORING = 3
+JSON_DECODER = json.JSONDecoder()
 
 
 def extract_resource_ids(response: dict) -> list[str]:
@@ -142,8 +143,13 @@ def detail_hit_scores_from_parsed_json(parsed: dict | None, ground_truth_resourc
 def final_json_scores(final_response: dict, transcript: list[dict], ground_truth_resources: list[dict]) -> dict:
     parsed = final_json_from_response(final_response, transcript)
     recommendations = parsed.get("recommendations") if parsed else []
+    strict_valid = final_json_strict_valid(final_response, transcript)
+    parse_mode = final_json_parse_mode(final_response, transcript)
     return {
         "final_json_valid": parsed is not None,
+        "final_json_strict_valid": strict_valid,
+        "final_json_embedded_valid": parsed is not None and not strict_valid,
+        "final_json_parse_mode": parse_mode,
         "recommended_resource_detail_count": len((recommendations or [])[:MAX_RECOMMENDATIONS_FOR_SCORING]),
         "submitted_recommendation_count": len(recommendations or []),
     }
@@ -158,28 +164,79 @@ def final_json_from_response(response: dict, transcript: list[dict] | None = Non
     return parse_final_json(str(response.get("output_text", "")))
 
 
+def final_json_strict_valid(response: dict, transcript: list[dict] | None = None) -> bool:
+    result = response.get("structured_result") or {}
+    if "final_json_strict_valid" in result:
+        return bool(result.get("final_json_strict_valid"))
+    if isinstance(result.get("final_json"), dict):
+        return bool(result.get("final_json_valid"))
+    text = final_recommendation_text(transcript, response) if transcript else str(response.get("output_text", ""))
+    return parse_strict_final_json(text) is not None
+
+
+def final_json_parse_mode(response: dict, transcript: list[dict] | None = None) -> str:
+    result = response.get("structured_result") or {}
+    mode = result.get("final_json_parse_mode")
+    if isinstance(mode, str) and mode:
+        return mode
+    if isinstance(result.get("final_json"), dict):
+        return "strict" if result.get("final_json_valid") else "embedded"
+    text = final_recommendation_text(transcript, response) if transcript else str(response.get("output_text", ""))
+    return parse_final_json_mode(text)
+
+
 def parse_final_json(text: str) -> dict | None:
+    return parse_strict_final_json(text) or parse_embedded_final_json(text)
+
+
+def parse_strict_final_json(text: str) -> dict | None:
     text = strip_react_prefix(text).strip()
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
         return None
+    return parsed if valid_final_json_object(parsed) else None
+
+
+def parse_embedded_final_json(text: str) -> dict | None:
+    text = strip_react_prefix(text)
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            parsed, _ = JSON_DECODER.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if valid_final_json_object(parsed):
+            return parsed
+    return None
+
+
+def parse_final_json_mode(text: str) -> str:
+    if parse_strict_final_json(text) is not None:
+        return "strict"
+    if parse_embedded_final_json(text) is not None:
+        return "embedded"
+    return "none"
+
+
+def valid_final_json_object(parsed) -> bool:
     if not isinstance(parsed, dict):
-        return None
+        return False
     recommendations = parsed.get("recommendations")
     if not isinstance(recommendations, list):
-        return None
+        return False
     for item in recommendations:
         if not isinstance(item, dict):
-            return None
+            return False
         if not isinstance(item.get("resource_id"), str) or not item["resource_id"].strip():
-            return None
+            return False
         if not isinstance(item.get("resource_name"), str) or not item["resource_name"].strip():
-            return None
+            return False
         for key in ("intake_methods", "document_requirements"):
             if not isinstance(item.get(key), list) or not all(isinstance(value, str) for value in item[key]):
-                return None
-    return parsed
+                return False
+    return True
 
 
 def strip_react_prefix(text: str) -> str:
@@ -228,7 +285,50 @@ def detail_hit_scores_from_json(parsed: dict, ground_truth_resources: list[dict]
 
 
 def count_function_calls(response: dict) -> int:
-    return len(response.get("tool_calls", ()))
+    return len(executed_tool_call_records(response))
+
+
+def executed_tool_call_records(response: dict) -> list[dict]:
+    records = []
+    seen = set()
+    pending_calls = {}
+    for item in response.get("input", []) or []:
+        item_type = item_get(item, "type")
+        if item_type == "function_call":
+            call_id = item_get(item, "call_id")
+            pending_calls[call_id] = parse_json_object(item_get(item, "arguments") or "{}")
+            continue
+        if item_type != "function_call_output":
+            continue
+        output = item_get(item, "output") or ""
+        result = parse_tool_output(output)
+        if "resources" not in result and "error" in result:
+            continue
+        key = (item_get(item, "call_id"), output)
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append(
+            {
+                "arguments": pending_calls.get(item_get(item, "call_id"), {}),
+                "result": result,
+            }
+        )
+    if records:
+        return records
+    for call in response.get("tool_calls", ()) or ():
+        arguments = call.get("arguments") or {}
+        result = call.get("result") or {}
+        records.append({"arguments": arguments, "result": result})
+    return records
+
+
+def parse_json_object(text: str) -> dict:
+    try:
+        parsed = json.loads(text or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def item_get(item, key: str):
@@ -257,6 +357,8 @@ def aggregate(scores: list[dict]) -> dict:
         "intake_hit_rate": mean(score.get("intake_hit") for score in scores),
         "document_hit_rate": mean(score.get("document_hit") for score in scores),
         "final_json_valid_rate": mean(score.get("final_json_valid") for score in scores),
+        "final_json_strict_valid_rate": mean(score.get("final_json_strict_valid") for score in scores),
+        "final_json_embedded_valid_rate": mean(score.get("final_json_embedded_valid") for score in scores),
         "retrieval_hit_rate": mean(score["retrieval_hit"] for score in scores),
         "average_tool_calls": sum(score["tool_call_count"] for score in scores) / len(scores),
         "average_turns": sum(score["turn_count"] for score in scores) / len(scores),

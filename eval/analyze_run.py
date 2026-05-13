@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from eval.metrics import aggregate, aggregate_breakdown, parse_tool_output, score_case
+from eval.metrics import aggregate, aggregate_breakdown, executed_tool_call_records, score_case
 
 
 def main() -> None:
@@ -103,6 +103,8 @@ def analyze_cases(cases: list[dict], scores: list[dict]) -> dict:
         if not score["id_hit"]:
             if not score.get("final_json_valid"):
                 failure_counts["invalid_final_json"] += 1
+            elif not score.get("final_json_strict_valid"):
+                failure_counts["non_strict_final_json"] += 1
             if not score["retrieval_hit"]:
                 failure_counts["retrieval_miss"] += 1
                 update_retrieval_field_errors(retrieval_field_errors, case, score)
@@ -124,9 +126,7 @@ def analyze_cases(cases: list[dict], scores: list[dict]) -> dict:
                 ):
                     failure_counts["possible_id_format"] += 1
         response = case["response"]
-        input_items = response.get("input", [])
-        outputs = [item for item in input_items if item.get("type") == "function_call_output"]
-        executed_tool_calls = response.get("tool_calls", [])
+        executed_tool_calls = executed_tool_call_records(response)
         if not executed_tool_calls:
             no_tool_case_count += 1
         total_function_calls += len(executed_tool_calls)
@@ -137,11 +137,11 @@ def analyze_cases(cases: list[dict], scores: list[dict]) -> dict:
                     filter_counts[key] += 1
             for service_category in args.get("service_categories", []) or []:
                 service_category_counts[service_category] += 1
-        for output in outputs:
-            result = parse_tool_output(output.get("output", ""))
+        for output in executed_tool_calls:
+            result = output.get("result") or {}
             if not result.get("resources"):
                 empty_outputs += 1
-        if outputs and all(not parse_tool_output(output.get("output", "")).get("resources") for output in outputs):
+        if executed_tool_calls and all(not (output.get("result") or {}).get("resources") for output in executed_tool_calls):
             final_text = response.get("output_text", "").lower()
             if any(term in final_text for term in ["consider", "local", "general", "you might", "not able to find"]):
                 general_advice_after_empty_count += 1
@@ -158,6 +158,7 @@ def analyze_cases(cases: list[dict], scores: list[dict]) -> dict:
             "retrieved_but_not_recommended_or_id": failure_counts["retrieved_but_not_recommended_or_id"],
             "detail_miss": failure_counts["detail_miss"],
             "invalid_final_json": failure_counts["invalid_final_json"],
+            "non_strict_final_json": failure_counts["non_strict_final_json"],
             "possible_id_format": failure_counts["possible_id_format"],
         },
         "retrieval_miss_field_errors": finalize_retrieval_field_error_stats(retrieval_field_errors),
@@ -197,7 +198,7 @@ def update_retrieval_field_errors(stats: dict, case: dict, score: dict) -> None:
     if case_type not in stats:
         stats[case_type] = new_retrieval_field_error_group()
     group = stats[case_type]
-    calls = case.get("response", {}).get("tool_calls", []) or []
+    calls = executed_tool_call_records(case.get("response", {}))
     retrieved_ids = set(score.get("retrieved_resource_ids") or [])
     location_requirement = case.get("ground_truth", {}).get("location_requirement") or case.get("card", {}).get("location_requirement") or {}
     needs = case.get("ground_truth", {}).get("needs") or case.get("card", {}).get("case_spec", {}).get("needs") or []
@@ -264,6 +265,8 @@ def tool_location_matches(args: dict, location_requirement: dict) -> bool:
 
 
 def normalize_schedule(schedule: dict) -> dict:
+    if not isinstance(schedule, dict):
+        return {}
     if schedule.get("requires_24_hours") is True:
         return {"requires_24_hours": True}
     day = str(schedule.get("day") or "").strip().lower()[:3]
