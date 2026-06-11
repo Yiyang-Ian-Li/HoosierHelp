@@ -1,6 +1,7 @@
 .env
 *.sqlite
 data/indiana211/indiana211_resources_raw_all_counties.json
+data/mvp*/
 tests/
 experiments/
 paper/

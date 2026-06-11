@@ -13,7 +13,20 @@ def load_dotenv(path: Path = Path(".env")) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+        os.environ.setdefault(key.strip(), parse_dotenv_value(value))
+
+
+def parse_dotenv_value(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    if value[0] in {"'", '"'}:
+        quote = value[0]
+        end = value.find(quote, 1)
+        if end != -1:
+            return value[1:end]
+        return value[1:]
+    return value.split("#", 1)[0].strip()
 
 
 def make_openai_client(provider: str = "openai"):

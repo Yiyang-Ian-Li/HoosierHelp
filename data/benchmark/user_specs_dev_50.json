@@ -1,0 +1,1041 @@
+[
+  {
+    "user_spec_id": "dev-spec-001",
+    "source_resource_id": "in211-2356-4245-lgbtq-community-center-indianapolis",
+    "service_name": "LGBTQ+ Community Center - Indianapolis",
+    "service_category": "Community and Recreation",
+    "schedule": {},
+    "location": {
+      "cities": [
+        "Indianapolis"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [
+      "birth_certificate"
+    ],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-002",
+    "source_resource_id": "in211-6873-11855-disability-services",
+    "service_name": "Disability Services",
+    "service_category": "Disability and Rehabilitation",
+    "schedule": {},
+    "location": {
+      "zipcodes": [
+        "46408"
+      ]
+    },
+    "intake_methods": [
+      "appointment"
+    ],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-003",
+    "source_resource_id": "in211-221-508-sandbags",
+    "service_name": "Sandbags",
+    "service_category": "Disaster and Environmental Services",
+    "schedule": {
+      "day": "fri",
+      "start_time": "14:30",
+      "end_time": "16:00"
+    },
+    "location": {
+      "zipcodes": [
+        "46802"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-004",
+    "source_resource_id": "in211-863-1514-public-library",
+    "service_name": "Public Library",
+    "service_category": "Education and Youth Programs",
+    "schedule": {},
+    "location": {
+      "counties": [
+        "DELAWARE"
+      ]
+    },
+    "intake_methods": [
+      "call"
+    ],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-005",
+    "source_resource_id": "in211-2386-4335-employment-guidance-and-referrals",
+    "service_name": "Employment Guidance and Referrals",
+    "service_category": "Employment and Job Training",
+    "schedule": {
+      "day": "wed",
+      "start_time": "12:00",
+      "end_time": "13:30"
+    },
+    "location": {
+      "zipcodes": [
+        "46225"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [],
+    "eligibility": [
+      "homeless",
+      "senior"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-006",
+    "source_resource_id": "in211-2078-3595-infectious-disease-clinic",
+    "service_name": "Infectious Disease Clinic",
+    "service_category": "Family and Caregiver Services",
+    "schedule": {
+      "day": "wed",
+      "start_time": "08:30",
+      "end_time": "09:30"
+    },
+    "location": {
+      "counties": [
+        "MARION"
+      ]
+    },
+    "intake_methods": [
+      "call"
+    ],
+    "available_documents": [],
+    "eligibility": [
+      "senior",
+      "resident"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-007",
+    "source_resource_id": "in211-2491-4770-financial-coaching",
+    "service_name": "Financial Coaching",
+    "service_category": "Financial Assistance and Benefits",
+    "schedule": {
+      "day": "wed",
+      "start_time": "11:30",
+      "end_time": "12:30"
+    },
+    "location": {
+      "counties": [
+        "MORGAN"
+      ]
+    },
+    "intake_methods": [
+      "call"
+    ],
+    "available_documents": [],
+    "eligibility": [
+      "disability"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-008",
+    "source_resource_id": "in211-25-32-food-pantry",
+    "service_name": "Food Pantry",
+    "service_category": "Food Assistance",
+    "schedule": {
+      "day": "fri",
+      "start_time": "10:30",
+      "end_time": "12:30"
+    },
+    "location": {
+      "cities": [
+        "Nappanee"
+      ]
+    },
+    "intake_methods": [
+      "walk_in"
+    ],
+    "available_documents": [
+      "photo_id",
+      "proof_of_address",
+      "utility_bill",
+      "birth_certificate"
+    ],
+    "eligibility": [
+      "medicaid",
+      "uninsured"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-009",
+    "source_resource_id": "in211-5785-11343-veterans-administration-outpatient-clinic",
+    "service_name": "Veterans Administration Outpatient Clinic",
+    "service_category": "Health Care",
+    "schedule": {},
+    "location": {
+      "cities": [
+        "Crown Point"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [
+      "photo_id",
+      "insurance_card"
+    ],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-010",
+    "source_resource_id": "in211-1214-2102-transitional-housing-single-parents-and-married-couples",
+    "service_name": "Transitional Housing- Single Parents and Married Couples",
+    "service_category": "Housing and Shelter",
+    "schedule": {
+      "day": "fri",
+      "start_time": "08:00",
+      "end_time": "09:00"
+    },
+    "location": {},
+    "intake_methods": [
+      "call"
+    ],
+    "available_documents": [
+      "photo_id",
+      "social_security",
+      "proof_of_income"
+    ],
+    "eligibility": [
+      "low_income",
+      "homeless",
+      "youth",
+      "family",
+      "resident",
+      "uninsured"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-011",
+    "source_resource_id": "in211-244-545-virtual-eviction-and-housing-clinic",
+    "service_name": "Virtual Eviction and Housing Clinic",
+    "service_category": "Legal and Court Help",
+    "schedule": {},
+    "location": {
+      "counties": [
+        "ALLEN"
+      ]
+    },
+    "intake_methods": [
+      "call"
+    ],
+    "available_documents": [],
+    "eligibility": [
+      "uninsured",
+      "resident"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-012",
+    "source_resource_id": "in211-169-354-food-pantry",
+    "service_name": "Food Pantry",
+    "service_category": "Material Goods",
+    "schedule": {
+      "day": "thu",
+      "start_time": "11:00",
+      "end_time": "13:00"
+    },
+    "location": {
+      "counties": [
+        "ALLEN"
+      ]
+    },
+    "intake_methods": [
+      "walk_in"
+    ],
+    "available_documents": [
+      "utility_bill"
+    ],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-013",
+    "source_resource_id": "in211-2078-53663-infectious-disease-clinic",
+    "service_name": "Infectious Disease Clinic",
+    "service_category": "Medical Support Services",
+    "schedule": {
+      "day": "tue",
+      "start_time": "16:00",
+      "end_time": "17:00"
+    },
+    "location": {
+      "zipcodes": [
+        "46226"
+      ]
+    },
+    "intake_methods": [
+      "appointment"
+    ],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-014",
+    "source_resource_id": "in211-160-325-stroke-support-group",
+    "service_name": "Stroke Support Group",
+    "service_category": "Mental Health Care",
+    "schedule": {},
+    "location": {
+      "zipcodes": [
+        "46755"
+      ]
+    },
+    "intake_methods": [
+      "walk_in"
+    ],
+    "available_documents": [],
+    "eligibility": [
+      "family"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-015",
+    "source_resource_id": "in211-7049-13555-food-pantry-clark-county",
+    "service_name": "Food Pantry - Clark County",
+    "service_category": "Pet and Animal Services",
+    "schedule": {
+      "day": "mon",
+      "start_time": "11:00",
+      "end_time": "12:30"
+    },
+    "location": {
+      "cities": [
+        "Clarksville"
+      ]
+    },
+    "intake_methods": [
+      "appointment"
+    ],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-016",
+    "source_resource_id": "in211-3614-7558-family-planning",
+    "service_name": "Family Planning",
+    "service_category": "Pregnancy and Reproductive Health",
+    "schedule": {
+      "day": "thu",
+      "start_time": "13:30",
+      "end_time": "14:30"
+    },
+    "location": {
+      "cities": [
+        "Angola"
+      ]
+    },
+    "intake_methods": [
+      "call"
+    ],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-017",
+    "source_resource_id": "in211-40746-90487-911-services",
+    "service_name": "911 Services",
+    "service_category": "Public Safety",
+    "schedule": {
+      "requires_24_hours": true
+    },
+    "location": {
+      "counties": [
+        "GREENE"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-018",
+    "source_resource_id": "in211-6232-74717-outpatient-substance-use-treatment",
+    "service_name": "Outpatient Substance Use Treatment",
+    "service_category": "Substance Use Services",
+    "schedule": {
+      "day": "fri",
+      "start_time": "10:30",
+      "end_time": "12:30"
+    },
+    "location": {},
+    "intake_methods": [],
+    "available_documents": [
+      "photo_id",
+      "insurance_card"
+    ],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-019",
+    "source_resource_id": "in211-40723-91005-treasurer",
+    "service_name": "Treasurer",
+    "service_category": "Tax Help",
+    "schedule": {
+      "day": "mon",
+      "start_time": "12:30",
+      "end_time": "14:30"
+    },
+    "location": {
+      "zipcodes": [
+        "47167"
+      ]
+    },
+    "intake_methods": [
+      "call"
+    ],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-020",
+    "source_resource_id": "in211-826-1268-disability-transportation-transfer-station",
+    "service_name": "Disability Transportation - Transfer Station",
+    "service_category": "Transportation",
+    "schedule": {
+      "day": "thu",
+      "start_time": "08:45",
+      "end_time": "10:45"
+    },
+    "location": {
+      "cities": [
+        "Muncie"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [
+      "photo_id"
+    ],
+    "eligibility": [
+      "resident"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-021",
+    "source_resource_id": "in211-2871-5512-utilities",
+    "service_name": "Utilities",
+    "service_category": "Utility Assistance",
+    "schedule": {
+      "day": "tue",
+      "start_time": "10:00",
+      "end_time": "12:00"
+    },
+    "location": {
+      "cities": [
+        "Peru"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [],
+    "eligibility": [
+      "senior"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-022",
+    "source_resource_id": "in211-3416-7192-community-center",
+    "service_name": "Community Center",
+    "service_category": "Community and Recreation",
+    "schedule": {},
+    "location": {
+      "cities": [
+        "Indianapolis"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [
+      "photo_id",
+      "proof_of_address",
+      "social_security",
+      "utility_bill",
+      "insurance_card"
+    ],
+    "eligibility": [
+      "resident",
+      "medicaid"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-023",
+    "source_resource_id": "in211-5615-11057-independent-living-skills",
+    "service_name": "Independent Living Skills",
+    "service_category": "Disability and Rehabilitation",
+    "schedule": {
+      "day": "tue",
+      "start_time": "12:30",
+      "end_time": "14:30"
+    },
+    "location": {
+      "zipcodes": [
+        "46410"
+      ]
+    },
+    "intake_methods": [
+      "appointment"
+    ],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-024",
+    "source_resource_id": "in211-40678-91580-sandbags",
+    "service_name": "Sandbags",
+    "service_category": "Disaster and Environmental Services",
+    "schedule": {},
+    "location": {
+      "cities": [
+        "Franklin"
+      ]
+    },
+    "intake_methods": [
+      "call"
+    ],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-025",
+    "source_resource_id": "in211-1655-2850-youth-enrichment-programs",
+    "service_name": "Youth Enrichment Programs",
+    "service_category": "Education and Youth Programs",
+    "schedule": {
+      "day": "tue",
+      "start_time": "12:00",
+      "end_time": "13:00"
+    },
+    "location": {},
+    "intake_methods": [
+      "online"
+    ],
+    "available_documents": [
+      "utility_bill",
+      "photo_id"
+    ],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-026",
+    "source_resource_id": "in211-2236-3920-job-search-assistance",
+    "service_name": "Job Search Assistance",
+    "service_category": "Employment and Job Training",
+    "schedule": {
+      "day": "fri",
+      "start_time": "16:00",
+      "end_time": "17:00"
+    },
+    "location": {
+      "zipcodes": [
+        "46222"
+      ]
+    },
+    "intake_methods": [
+      "appointment"
+    ],
+    "available_documents": [
+      "photo_id",
+      "proof_of_address",
+      "utility_bill"
+    ],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-027",
+    "source_resource_id": "in211-4859-9692-rape-crisis-center",
+    "service_name": "Rape Crisis Center",
+    "service_category": "Family and Caregiver Services",
+    "schedule": {},
+    "location": {
+      "counties": [
+        "TIPPECANOE"
+      ]
+    },
+    "intake_methods": [
+      "call"
+    ],
+    "available_documents": [
+      "social_security"
+    ],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-028",
+    "source_resource_id": "in211-4645-9229-representative-payee-program",
+    "service_name": "Representative Payee Program",
+    "service_category": "Financial Assistance and Benefits",
+    "schedule": {
+      "day": "tue",
+      "start_time": "14:30",
+      "end_time": "16:30"
+    },
+    "location": {
+      "cities": [
+        "Lafayette"
+      ]
+    },
+    "intake_methods": [
+      "call"
+    ],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-029",
+    "source_resource_id": "in211-116-197-food-pantry-saint-mark-s-lutheran-church",
+    "service_name": "Food Pantry - Saint Mark's Lutheran Church",
+    "service_category": "Food Assistance",
+    "schedule": {
+      "day": "tue",
+      "start_time": "17:00",
+      "end_time": "19:00"
+    },
+    "location": {
+      "zipcodes": [
+        "46773"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-030",
+    "source_resource_id": "in211-41236-91496-mental-health-and-substance-use-telehealth-services",
+    "service_name": "Mental Health and Substance Use Telehealth Services",
+    "service_category": "Health Care",
+    "schedule": {
+      "requires_24_hours": true
+    },
+    "location": {
+      "zipcodes": [
+        "46204"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [
+      "photo_id",
+      "insurance_card",
+      "proof_of_address",
+      "proof_of_income"
+    ],
+    "eligibility": [
+      "medicaid"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-031",
+    "source_resource_id": "in211-41457-91893-homeless-shelter",
+    "service_name": "Homeless Shelter",
+    "service_category": "Housing and Shelter",
+    "schedule": {
+      "day": "wed",
+      "start_time": "12:30",
+      "end_time": "14:00"
+    },
+    "location": {
+      "zipcodes": [
+        "46383"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-032",
+    "source_resource_id": "in211-1845-3162-legal-aid",
+    "service_name": "Legal Aid",
+    "service_category": "Legal and Court Help",
+    "schedule": {
+      "day": "thu",
+      "start_time": "10:00",
+      "end_time": "11:00"
+    },
+    "location": {
+      "zipcodes": [
+        "46122"
+      ]
+    },
+    "intake_methods": [
+      "appointment"
+    ],
+    "available_documents": [],
+    "eligibility": [
+      "low_income",
+      "senior",
+      "pregnant",
+      "family"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-033",
+    "source_resource_id": "in211-1092-1840-baby-clothing-and-diapers",
+    "service_name": "Baby Clothing and Diapers",
+    "service_category": "Material Goods",
+    "schedule": {},
+    "location": {
+      "cities": [
+        "Logansport"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [],
+    "eligibility": [
+      "pregnant",
+      "disability"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-034",
+    "source_resource_id": "in211-6842-8528-wigs",
+    "service_name": "Wigs",
+    "service_category": "Medical Support Services",
+    "schedule": {
+      "day": "thu",
+      "start_time": "10:30",
+      "end_time": "12:30"
+    },
+    "location": {
+      "cities": [
+        "South Bend"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-035",
+    "source_resource_id": "in211-4624-9179-disability-social-and-support-groups",
+    "service_name": "Disability Social and Support Groups",
+    "service_category": "Mental Health Care",
+    "schedule": {
+      "day": "thu",
+      "start_time": "13:00",
+      "end_time": "14:30"
+    },
+    "location": {
+      "cities": [
+        "Terre Haute"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-036",
+    "source_resource_id": "in211-2219-3878-vaccination-clinic",
+    "service_name": "Vaccination Clinic",
+    "service_category": "Pet and Animal Services",
+    "schedule": {
+      "day": "mon",
+      "start_time": "12:30",
+      "end_time": "14:30"
+    },
+    "location": {
+      "zipcodes": [
+        "46201"
+      ]
+    },
+    "intake_methods": [
+      "online"
+    ],
+    "available_documents": [
+      "insurance_card",
+      "birth_certificate"
+    ],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-037",
+    "source_resource_id": "in211-3462-7320-family-planning",
+    "service_name": "Family Planning",
+    "service_category": "Pregnancy and Reproductive Health",
+    "schedule": {
+      "day": "mon",
+      "start_time": "14:30",
+      "end_time": "15:30"
+    },
+    "location": {},
+    "intake_methods": [],
+    "available_documents": [
+      "photo_id"
+    ],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-038",
+    "source_resource_id": "in211-40733-90499-911-services",
+    "service_name": "911 Services",
+    "service_category": "Public Safety",
+    "schedule": {
+      "requires_24_hours": true
+    },
+    "location": {
+      "counties": [
+        "OWEN"
+      ]
+    },
+    "intake_methods": [
+      "call"
+    ],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-039",
+    "source_resource_id": "in211-4162-8427-substance-use-disorder-counseling",
+    "service_name": "Substance Use Disorder Counseling",
+    "service_category": "Substance Use Services",
+    "schedule": {},
+    "location": {
+      "counties": [
+        "SHELBY"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [
+      "birth_certificate",
+      "social_security"
+    ],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-040",
+    "source_resource_id": "in211-40732-93489-treasurer",
+    "service_name": "Treasurer",
+    "service_category": "Tax Help",
+    "schedule": {
+      "day": "wed",
+      "start_time": "10:00",
+      "end_time": "12:00"
+    },
+    "location": {
+      "cities": [
+        "Petersburg"
+      ]
+    },
+    "intake_methods": [
+      "online"
+    ],
+    "available_documents": [],
+    "eligibility": [
+      "family",
+      "homeless"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-041",
+    "source_resource_id": "in211-4281-8641-medical-transportation",
+    "service_name": "Medical Transportation",
+    "service_category": "Transportation",
+    "schedule": {
+      "day": "tue",
+      "start_time": "13:00",
+      "end_time": "14:30"
+    },
+    "location": {
+      "cities": [
+        "Wabash"
+      ]
+    },
+    "intake_methods": [
+      "call"
+    ],
+    "available_documents": [
+      "social_security",
+      "insurance_card"
+    ],
+    "eligibility": [
+      "resident"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-042",
+    "source_resource_id": "in211-6147-12035-utilities",
+    "service_name": "Utilities",
+    "service_category": "Utility Assistance",
+    "schedule": {
+      "day": "fri",
+      "start_time": "10:00",
+      "end_time": "11:00"
+    },
+    "location": {
+      "counties": [
+        "BARTHOLOMEW"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [],
+    "eligibility": [
+      "medicaid"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-043",
+    "source_resource_id": "in211-3395-7175-career-services",
+    "service_name": "Career Services",
+    "service_category": "Community and Recreation",
+    "schedule": {
+      "day": "thu",
+      "start_time": "14:30",
+      "end_time": "15:30"
+    },
+    "location": {},
+    "intake_methods": [
+      "appointment"
+    ],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-044",
+    "source_resource_id": "in211-4624-9179-information-and-referral",
+    "service_name": "Information and Referral",
+    "service_category": "Disability and Rehabilitation",
+    "schedule": {
+      "day": "wed",
+      "start_time": "12:00",
+      "end_time": "13:30"
+    },
+    "location": {
+      "counties": [
+        "VIGO"
+      ]
+    },
+    "intake_methods": [
+      "appointment"
+    ],
+    "available_documents": [
+      "proof_of_address"
+    ],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-045",
+    "source_resource_id": "in211-40711-90593-weather-alert-radios",
+    "service_name": "Weather Alert Radios",
+    "service_category": "Disaster and Environmental Services",
+    "schedule": {
+      "day": "mon",
+      "start_time": "15:00",
+      "end_time": "16:00"
+    },
+    "location": {
+      "counties": [
+        "CARROLL"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [
+      "insurance_card",
+      "social_security"
+    ],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-046",
+    "source_resource_id": "in211-3378-7061-tutoring",
+    "service_name": "Tutoring",
+    "service_category": "Education and Youth Programs",
+    "schedule": {
+      "day": "mon",
+      "start_time": "11:00",
+      "end_time": "13:00"
+    },
+    "location": {
+      "counties": [
+        "MONROE"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [],
+    "eligibility": [
+      "veteran",
+      "pregnant"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-047",
+    "source_resource_id": "in211-1856-3188-economic-self-sufficiency",
+    "service_name": "Economic Self Sufficiency",
+    "service_category": "Employment and Job Training",
+    "schedule": {},
+    "location": {},
+    "intake_methods": [],
+    "available_documents": [],
+    "eligibility": [
+      "veteran"
+    ]
+  },
+  {
+    "user_spec_id": "dev-spec-048",
+    "source_resource_id": "in211-41139-91279-case-management",
+    "service_name": "Case Management",
+    "service_category": "Family and Caregiver Services",
+    "schedule": {},
+    "location": {
+      "zipcodes": [
+        "46012"
+      ]
+    },
+    "intake_methods": [],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-049",
+    "source_resource_id": "in211-117-209-financial-education",
+    "service_name": "Financial Education",
+    "service_category": "Financial Assistance and Benefits",
+    "schedule": {
+      "day": "tue",
+      "start_time": "09:30",
+      "end_time": "11:30"
+    },
+    "location": {
+      "zipcodes": [
+        "46802"
+      ]
+    },
+    "intake_methods": [
+      "appointment"
+    ],
+    "available_documents": [],
+    "eligibility": []
+  },
+  {
+    "user_spec_id": "dev-spec-050",
+    "source_resource_id": "in211-3516-7402-food-pantry",
+    "service_name": "Food Pantry",
+    "service_category": "Food Assistance",
+    "schedule": {
+      "day": "mon",
+      "start_time": "10:00",
+      "end_time": "11:30"
+    },
+    "location": {
+      "counties": [
+        "ST. JOSEPH"
+      ]
+    },
+    "intake_methods": [
+      "walk_in"
+    ],
+    "available_documents": [
+      "photo_id",
+      "social_security"
+    ],
+    "eligibility": [
+      "resident",
+      "veteran"
+    ]
+  }
+]

@@ -76,6 +76,7 @@ class RawResource:
     schedule_windows: tuple
     intake_methods: tuple[str, ...]
     document_requirements: tuple[str, ...]
+    eligibility_tags: tuple[str, ...]
 
 RAW_FIELDS = [
     "resource_id",
@@ -101,21 +102,15 @@ RAW_FIELDS = [
 
 TAGGED_FIELDS = [
     "resource_id",
-    "agency_name",
-    "site_name",
     "service_name",
     "service_categories",
-    "service_area",
+    "counties",
     "city",
-    "state",
     "zipcode",
-    "address_1",
-    "phone",
-    "website",
-    "schedule_status",
     "schedule_windows",
     "intake_methods",
     "document_requirements",
+    "eligibility",
 ]
 
 
@@ -154,6 +149,7 @@ def load_raw_indiana_csv(path: Path | str) -> list[RawResource]:
                     schedule_windows=schedule_windows(site_schedule),
                     intake_methods=parse_intake_methods(site_details),
                     document_requirements=parse_document_requirements(documents_required),
+                    eligibility_tags=parse_eligibility_tags(row.get("site_eligibility", "")),
                 )
             )
     return resources
@@ -182,6 +178,23 @@ def parse_document_requirements(text: object) -> tuple[str, ...]:
     append_if(tags, "social_security", "social security" in raw)
     append_if(tags, "birth_certificate", "birth certificate" in raw)
     append_if(tags, "utility_bill", "utility bill" in raw)
+    return tuple(tags) if tags else ("none",)
+
+
+def parse_eligibility_tags(text: object) -> tuple[str, ...]:
+    raw = clean(text).lower()
+    tags = []
+    append_if(tags, "low_income", any(word in raw for word in ("low income", "income eligible", "poverty", "financial need")))
+    append_if(tags, "resident", any(word in raw for word in ("resident", "reside", "live in", "lives in")))
+    append_if(tags, "homeless", any(word in raw for word in ("homeless", "unstably housed", "without housing")))
+    append_if(tags, "veteran", any(word in raw for word in ("veteran", "military", "service member", "servicemember")))
+    append_if(tags, "senior", any(word in raw for word in ("senior", "older adult", "elderly", "age 60", "60+", "55+")))
+    append_if(tags, "youth", any(word in raw for word in ("youth", "child", "children", "teen", "student", "minor")))
+    append_if(tags, "family", any(word in raw for word in ("family", "families", "parent", "guardian", "household")))
+    append_if(tags, "pregnant", any(word in raw for word in ("pregnant", "pregnancy", "prenatal")))
+    append_if(tags, "disability", any(word in raw for word in ("disability", "disabled", "developmental delay", "impairment")))
+    append_if(tags, "uninsured", any(word in raw for word in ("uninsured", "no insurance", "underinsured")))
+    append_if(tags, "medicaid", "medicaid" in raw)
     return tuple(tags) if tags else ("none",)
 
 
@@ -243,7 +256,7 @@ def filter_benchmark_resources(resources: list[RawResource], verbose: bool = Tru
         verbose,
     )
     if verbose:
-        print("[resource-filter] fee_and_eligibility: ignored")
+        print("[resource-filter] fee: ignored; eligibility parsed into tags")
     return current
 
 
@@ -356,24 +369,19 @@ def raw_resource_row(resource: RawResource) -> dict:
 def tagged_resource_row(resource: RawResource) -> dict:
     return {
         "resource_id": resource.resource_id,
-        "agency_name": resource.agency_name,
-        "site_name": resource.site_name,
         "service_name": resource.service_name,
         "service_categories": pipe_join(resource.service_categories),
-        "service_area": pipe_join(resource.service_area),
+        "counties": pipe_join(resource.service_area),
         "city": resource.city,
-        "state": resource.state,
         "zipcode": resource.zipcode,
-        "address_1": resource.address_1,
-        "phone": resource.phone,
-        "website": resource.website,
-        "schedule_status": resource.schedule_status,
         "schedule_windows": json.dumps(
             [
                 {
                     "day": window.day,
                     "start": format_minutes(window.start_minute),
                     "end": format_minutes(window.end_minute),
+                    "start_minute": window.start_minute,
+                    "end_minute": window.end_minute,
                 }
                 for window in resource.schedule_windows
             ],
@@ -381,6 +389,7 @@ def tagged_resource_row(resource: RawResource) -> dict:
         ),
         "intake_methods": pipe_join(resource.intake_methods),
         "document_requirements": pipe_join(resource.document_requirements),
+        "eligibility": pipe_join(resource.eligibility_tags),
     }
 
 

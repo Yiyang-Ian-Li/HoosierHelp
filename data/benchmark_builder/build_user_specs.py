@@ -19,10 +19,7 @@ def main() -> None:
     resources = load_resource_index(args.index_path).resources
     specs = build_user_specs(
         resources,
-        case_type_targets={
-            "single": args.single,
-            "composite": args.composite,
-        },
+        count=args.count,
         seed=args.seed,
         progress_every=args.progress_every,
     )
@@ -31,10 +28,9 @@ def main() -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build deterministic benchmark user specs.")
+    parser = argparse.ArgumentParser(description="Build benchmark user specs.")
     parser.add_argument("--index-path", type=Path, default=Path("data/benchmark/filtered_resources_tagged.csv"))
-    parser.add_argument("--single", type=int, required=True)
-    parser.add_argument("--composite", type=int, required=True)
+    parser.add_argument("--count", type=int, required=True)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--case-specs-out", type=Path, default=CASE_SPECS_PATH)
     parser.add_argument("--progress-every", type=int, default=100)

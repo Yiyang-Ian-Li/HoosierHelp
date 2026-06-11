@@ -1,147 +1,123 @@
-# Agent
+# HoosierHelp
 
-Local resource search agent for Indiana 211 data.
+HoosierHelp is an evaluation and training sandbox for Indiana 211-style
+resource-search agents. The current benchmark focuses on one narrow capability:
+after a multi-turn conversation with a simulated user, the agent should emit the
+correct `search_resources` tool call.
 
-Run evaluation by editing `CONFIG` in `main.py`, then executing:
+The evaluation scores tool-call arguments only. It does not execute the search
+tool and does not evaluate final resource recommendations. This keeps the
+benchmark focused on whether the agent collected and preserved the right user
+facts: service need, location, schedule, intake methods, documents, and
+eligibility constraints.
 
-```bash
-uv run python main.py
+## What Is Evaluated
+
+Each case contains hidden user facts and an expected `search_resources` call.
+The simulated user reveals those facts through one of several behavior modes:
+
+```text
+normal
+rambling
+impatience
+self_contradictory
+unsupported_request
 ```
 
-For a single ad hoc query, edit `CONFIG` in `playground.py` and run:
+The agent is evaluated on whether its final tool call matches the expected
+normalized arguments. Field-level scores and full transcripts are saved for
+analysis.
 
-```bash
-uv run python playground.py
+## Main Components
+
+```text
+eval/                         Online evaluation harness
+  tool_call_eval.py            Main eval entrypoint
+  tool_call_backends.py        Local HF and Responses API backends
+  tool_call_parsers.py         Tool-call parsers
+  tool_call_schema.py          Normalization and scoring
+  llm_user.py                  LLM simulated user
+
+train/                        Training data and baseline methods
+  build_turn_samples.py        Build assistant-turn training samples
+  build_teacher_samples.py     Generate privileged teacher completions
+  opsd.py                     On-policy self-distillation baseline
+  grpo.py                     GRPO baseline
+
+tools/                        Indiana 211 resource schema and indexing
+data/benchmark/               Benchmark specs and tagged resources
+experiments/                  Eval and training outputs
 ```
-
-By default this uses the OpenAI Responses API:
-
-```bash
-export OPENAI_API_KEY="..."
-```
-
-`OPENROUTER_API_KEY` can still be configured in `main.py` by setting
-`"provider": "openrouter"` if the selected OpenRouter model supports the
-Responses-style endpoint.
 
 ## Data
 
-The retained Indiana 211 source files are:
+Primary benchmark files live under `data/benchmark/`:
 
 ```text
-data/indiana211/indiana211_resources_raw_all_counties.json
-data/indiana211/indiana211_resources_deduped.csv
-data/indiana211/indiana211_resource_county_rows.csv
-data/indiana211/indiana211_counties.csv
+case_specs.json
+user_specs_train_100.json
+user_specs_dev_50.json
+user_specs_test_50.json
+filtered_resources_tagged.csv
+filtered_resources_raw.csv
 ```
 
-Benchmark case specs live under:
+The train/dev/test user spec files are disjoint by source resource, so training
+and held-out evaluation can use different underlying cases.
 
-```text
-data/benchmark/case_specs.json
-data/benchmark/user_cards.json
-data/benchmark/filtered_resources_raw.csv
-data/benchmark/filtered_resources_tagged.csv
-```
+## Running Evaluation
 
-`case_specs.json` includes the deterministic source data, single/composite
-needs, and one or two `ground_truth_resource_ids`. `user_cards.json` is
-generated from those specs for LLM simulated eval.
-
-Experiment outputs live outside `data/`:
-
-```text
-experiments/<timestamp>__agent-react__agentmodel-...__usermodel-...__n.../
-experiments/<run>/conversations/<user_id>.json
-```
-
-## Code
-
-Core files:
-
-```text
-main.py
-agent/agent.py
-agent/llm.py
-tools/indiana211.py
-eval/agent_instructions.py
-eval/run_eval.py
-eval/analyze_run.py
-data/benchmark_builder/resource_filter.py
-data/benchmark_builder/build_user_specs.py
-data/benchmark_builder/build_user_cards.py
-```
-
-`agent/agent.py` is a generic Responses API function-calling loop. It receives
-tool schemas and a plain `tool_functions` dictionary, executes requested
-function calls, appends `function_call_output`, and asks the model again.
-Benchmark-specific agent instructions live in `eval/agent_instructions.py`.
-
-`tools/indiana211.py` exposes the Indiana 211 `search_resources` tool, with
-models, tag parsing, and schedule parsing split into adjacent helper modules.
-The default tool index is `data/benchmark/filtered_resources_tagged.csv`.
-County, city, ZIP, service category, and schedule fields are hard filters when
-provided. Intake methods and document requirements are returned for the final
-recommendation but are not search filters. Schedule filtering uses one
-`schedule` object with either `{day, time}` or `{requires_24_hours: true}`.
-
-Benchmark cases are now generated as `single` or `composite`. A single case has
-one service need, one schedule requirement, and one location requirement. A
-composite case has two service needs with separate non-overlapping schedule
-requirements and a shared location. Ground truth resources include the intake
-methods and document requirements the final answer should report.
-
-## LLM Simulated Eval
-
-Generate or refresh deterministic case specs:
+Local Qwen baseline:
 
 ```bash
-uv run python data/benchmark_builder/build_user_specs.py --single 150 --composite 150
+uv run python -m eval.tool_call_eval \
+  --backend local \
+  --model Qwen/Qwen3-4B-Instruct-2507
 ```
 
-Generate LLM simulated-user cards from the case specs:
+OpenAI or OpenRouter Responses API:
 
 ```bash
-uv run python data/benchmark_builder/build_user_cards.py --model openai/gpt-4.1
+export OPENAI_API_KEY="..."
+uv run python -m eval.tool_call_eval --backend responses --provider openai --model gpt-4.1-mini
+
+export OPENROUTER_API_KEY="..."
+uv run python -m eval.tool_call_eval --backend responses --provider openrouter --model openai/gpt-4.1-mini
 ```
 
-Resource and user-spec distribution notebooks:
+If `--output-dir` is omitted, the evaluator creates a timestamped directory
+under `experiments/tool_call_eval/`. Each run writes `args.json`,
+`records.jsonl`, and `summary.json`.
 
-```text
-data/benchmark_builder/analysis/resources_stat.ipynb
-data/benchmark_builder/analysis/user_stat.ipynb
-```
-
-Run an OpenAI evaluation with an LLM simulated user:
+For OpenRouter connectivity:
 
 ```bash
-uv run python main.py
+uv run python scripts/smoke_openrouter.py
 ```
 
-`main.py` is the eval entrypoint. Its `CONFIG` controls provider, agent
-type/model, user model, data paths, turn limit, and parallel jobs.
-Set `case_type` to `single`, `composite`, or `all` in `main.py`. The same
-option is available from the CLI:
+## Training Baselines
+
+The repo currently includes two local training baselines:
+
+- OPSD: a privileged self-teacher sees the user behavior label and provides the
+  target distribution for the same model under the normal prompt.
+- GRPO: samples final tool-call states and optimizes a soft reward over valid
+  tool-call fields.
+
+Typical workflow:
 
 ```bash
-uv run python -m eval.run_eval --case-type single
-uv run python -m eval.run_eval --case-type composite
+uv run python -m train.build_turn_samples --help
+uv run python -m train.build_teacher_samples --help
+uv run python -m train.opsd --help
+uv run python -m train.grpo --help
 ```
 
-Eval stops on the first agent message that contains valid final JSON with a
-`recommendations` list. The agent may ask follow-up questions and can execute
-up to three real tool calls per case. ID hit scoring uses the first three final
-recommendations; intake methods and document requirements are tracked as
-auxiliary detail metrics. Retrieval metrics read tool results.
+Adapters produced by training can be evaluated by passing the adapter path to
+`eval.tool_call_eval`.
 
-Analyze an existing run:
+## Configuration
 
-```bash
-uv run python -m eval.analyze_run experiments/<run-id>
-```
-
-## Tests
-
-```bash
-uv run python -m unittest discover -s tests
-```
+`main.py` is a small config-driven wrapper around `eval.tool_call_eval` for
+repeatable local runs. Direct CLI usage is usually better for experiments that
+need explicit paths or model settings.

@@ -21,10 +21,7 @@ TOOL_DESCRIPTION = (
 )
 
 NO_DOCUMENT_VALUES = {"empty", "none", "varies"}
-DAY_PART_RANGES = {
-    "morning": (5 * 60, 12 * 60),
-    "afternoon": (12 * 60, 17 * 60),
-}
+DEFAULT_RESULT_LIMIT = 10
 
 def load_resource_index(path: Path | str = DEFAULT_RESOURCE_INDEX) -> ResourceIndex:
     return load_filtered_resources(path)
@@ -56,8 +53,9 @@ def search_resources_tool_schema(index: ResourceIndex) -> dict:
         "schedule": {
             "type": "object",
             "description": (
-                "Schedule requirement for this service need. Use either day+time, "
-                "or requires_24_hours=true. Use time='any' for day-only needs."
+                "Optional schedule requirement. Use day with start_time/end_time "
+                "when the user needs a specific availability window, or "
+                "requires_24_hours=true for 24-hour availability."
             ),
             "properties": {
                 "day": {
@@ -65,10 +63,13 @@ def search_resources_tool_schema(index: ResourceIndex) -> dict:
                     "enum": list(DAY_VALUES),
                     "description": "Required day: mon/tue/wed/thu/fri/sat/sun.",
                 },
-                "time": {
+                "start_time": {
                     "type": "string",
-                    "enum": ["any", "morning", "afternoon"],
-                    "description": "Use any, morning, or afternoon.",
+                    "description": "Start of needed window in 24-hour HH:MM format, such as 09:00.",
+                },
+                "end_time": {
+                    "type": "string",
+                    "description": "End of needed window in 24-hour HH:MM format, such as 17:30.",
                 },
                 "requires_24_hours": {
                     "type": "boolean",
@@ -77,12 +78,18 @@ def search_resources_tool_schema(index: ResourceIndex) -> dict:
             },
             "additionalProperties": False,
         },
-        "limit": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 20,
-            "description": "Maximum resources to return, from 1 to 20. Choose based on how many options are useful.",
-        },
+        "intake_methods": _enum_array_schema(
+            index.intake_methods,
+            "Optional intake methods the user can use, such as call, walk_in, online, appointment, email, text, or mail.",
+        ),
+        "available_documents": _enum_array_schema(
+            index.document_requirements,
+            "Optional documents the user can provide. These are capabilities, not required resource tags.",
+        ),
+        "eligibility": _enum_array_schema(
+            index.eligibility_tags,
+            "Optional user eligibility traits the user has, such as low_income, veteran, senior, youth, disability, pregnant, family, homeless, uninsured, or resident.",
+        ),
     }
     return {
         "type": "function",
@@ -91,7 +98,7 @@ def search_resources_tool_schema(index: ResourceIndex) -> dict:
         "parameters": {
             "type": "object",
             "properties": properties,
-            "required": ["service_categories", "schedule", "limit"],
+            "required": ["service_categories"],
             "additionalProperties": False,
         },
     }
@@ -121,22 +128,22 @@ def search_resources(index: ResourceIndex, request: SearchRequest) -> list[Searc
         key=lambda result: (
             -result.score,
             result.resource.service_name.lower(),
-            result.resource.agency_name.lower(),
             result.resource.resource_id,
         )
     )
-    return results[: request.limit]
+    return results[:DEFAULT_RESULT_LIMIT]
 
 
 def request_from_tool_args(args: dict, limit: int | None = None) -> SearchRequest:
-    requested_limit = _bounded_limit(args.get("limit"), fallback=limit)
     return SearchRequest(
+        service_categories=_string_tuple(args.get("service_categories")),
+        schedule=_schedule_object(args.get("schedule")),
         counties=_string_tuple(args.get("counties")),
         cities=_string_tuple(args.get("cities")),
         zipcodes=_string_tuple(args.get("zipcodes")),
-        service_categories=_string_tuple(args.get("service_categories")),
-        schedule=_schedule_object(args.get("schedule")),
-        limit=requested_limit,
+        intake_methods=_string_tuple(args.get("intake_methods")),
+        available_documents=_string_tuple(args.get("available_documents")),
+        eligibility=_string_tuple(args.get("eligibility")),
     )
 
 
@@ -146,12 +153,12 @@ def search_resources_tool_result(results: list[SearchResult]) -> dict:
             {
                 "resource_id": result.resource.resource_id,
                 "resource_name": result.resource.resource_name,
-                "agency_name": result.resource.agency_name,
                 "city": result.resource.city,
                 "zipcode": result.resource.zipcode,
                 "service_categories": result.resource.service_categories,
                 "intake_methods": result.resource.intake_methods,
                 "document_requirements": tuple(sorted(concrete_document_requirements(result.resource.document_requirements))),
+                "eligibility": result.resource.eligibility_tags,
             }
             for result in results
         ]
@@ -171,8 +178,19 @@ def _bounded_limit(value: object, fallback: int | None = None) -> int:
 def _match_resource(resource: Resource, request: SearchRequest) -> tuple[list[str], float] | None:
     matched = []
     score = 0.0
+    if request.service_categories:
+        if not _exact_any(request.service_categories, resource.service_categories):
+            return None
+        matched.append("service_categories")
+        score += 3.0
+    if request.schedule:
+        schedule_check = _match_schedule(resource, request)
+        if schedule_check is None:
+            return None
+        matched.append("schedule")
+        score += 2.0
     if request.counties:
-        if _exact_any(request.counties, resource.service_area):
+        if _exact_any(request.counties, resource.counties):
             matched.append("counties")
             score += 2.0
         else:
@@ -189,16 +207,21 @@ def _match_resource(resource: Resource, request: SearchRequest) -> tuple[list[st
             score += 1.0
         else:
             return None
-    if request.service_categories:
-        if not _exact_any(request.service_categories, resource.service_categories):
+    if request.intake_methods:
+        if _exact_any(request.intake_methods, resource.intake_methods):
+            matched.append("intake_methods")
+            score += 1.0
+        else:
             return None
-        matched.append("service_categories")
+    if request.available_documents:
+        if not _requirements_satisfied(resource.document_requirements, request.available_documents, NO_DOCUMENT_VALUES):
+            return None
+        matched.append("available_documents")
         score += 1.0
-    schedule_check = _match_schedule(resource, request)
-    if schedule_check is None:
-        return None
-    if schedule_check:
-        matched.append("schedule")
+    if request.eligibility:
+        if not _requirements_satisfied(resource.eligibility_tags, request.eligibility, {"none", "unknown"}):
+            return None
+        matched.append("eligibility")
         score += 1.0
     return matched, score
 
@@ -207,8 +230,6 @@ def _match_schedule(resource: Resource, request: SearchRequest) -> bool | None:
     schedule = request.schedule or {}
     if not schedule:
         return False
-    if resource.schedule_status != "structured":
-        return None
     windows = resource.schedule_windows
     if schedule.get("requires_24_hours"):
         return True if any(is_24_hour_window(window) for window in windows) else None
@@ -224,33 +245,35 @@ def concrete_document_requirements(values: tuple[str, ...]) -> set[str]:
 def _window_satisfies_schedule(window, schedule: dict) -> bool:
     if window.day != schedule.get("day"):
         return False
-    time = schedule.get("time", "any")
-    if time == "any":
-        return True
     if is_24_hour_window(window):
         return True
-    start, end = DAY_PART_RANGES[time]
-    return window.start_minute < end and window.end_minute > start
+    start = schedule.get("start_minute")
+    end = schedule.get("end_minute")
+    if start is None or end is None:
+        return True
+    return window.start_minute <= start and window.end_minute >= end
+
+
+def _requirements_satisfied(required: tuple[str, ...], available: tuple[str, ...], ignored: set[str]) -> bool:
+    required_set = {_norm(value) for value in required if _norm(value) not in ignored}
+    if not required_set:
+        return True
+    available_set = {_norm(value) for value in available}
+    return required_set <= available_set
 
 
 def _resource_from_filtered_row(row: dict) -> Resource:
     return Resource(
         resource_id=_clean(row.get("resource_id", "")),
         service_name=_clean(row.get("service_name", "")),
-        agency_name=_clean(row.get("agency_name", "")),
-        site_name=_clean(row.get("site_name", "")),
         service_categories=tuple(_split_pipe(row.get("service_categories", ""))),
-        service_area=tuple(_split_pipe(row.get("service_area", ""))),
+        counties=tuple(_split_pipe(row.get("counties", row.get("service_area", "")))),
         city=_clean(row.get("city", "")),
-        state=_clean(row.get("state", "")),
         zipcode=_clean(row.get("zipcode", "")),
-        address_1=_clean(row.get("address_1", "")),
-        phone=_clean(row.get("phone", "")),
-        website=_clean(row.get("website", "")),
-        schedule_status=_clean(row.get("schedule_status", "")),
         schedule_windows=schedule_windows_from_json(row),
         intake_methods=tuple(_split_pipe(row.get("intake_methods", ""))),
         document_requirements=tuple(_split_pipe(row.get("document_requirements", ""))),
+        eligibility_tags=tuple(_split_pipe(row.get("eligibility", row.get("eligibility_tags", "")))),
     )
 
 
@@ -290,10 +313,32 @@ def _schedule_object(value: object) -> dict:
     day = _norm(str(value.get("day", "")))[:3]
     if day not in DAY_VALUES:
         return {}
-    time = _norm(str(value.get("time", "any")))
-    if time not in {"any", "morning", "afternoon"}:
-        time = "any"
-    return {"day": day, "time": time}
+    start = _parse_hhmm(value.get("start_time"))
+    end = _parse_hhmm(value.get("end_time"))
+    result = {"day": day}
+    if start is not None and end is not None and start < end:
+        result["start_time"] = str(value.get("start_time"))
+        result["end_time"] = str(value.get("end_time"))
+        result["start_minute"] = start
+        result["end_minute"] = end
+    return result
+
+
+def _parse_hhmm(value: object) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parts = text.split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except ValueError:
+        return None
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return None
+    return hour * 60 + minute
 
 
 def _split_pipe(value: str) -> list[str]:
