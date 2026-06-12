@@ -1,61 +1,59 @@
 from __future__ import annotations
 
-from argparse import Namespace
 from pathlib import Path
+from typing import Any
 
-from eval.tool_call_eval import run as run_tool_call_eval
+from eval.tool_call_eval import EvalConfig, run as run_tool_call_eval
 
 
-CONFIG = {
-    "backend": "responses",  # "local" or "responses"
-    "provider": "openai",  # used only by backend="responses"
-    # "model": "Qwen/Qwen3-4B-Instruct-2507",
-    'model': 'gpt-4.1-mini',
+# Defaults come from EvalConfig. Keep these dicts to the few values a local run
+# usually changes, so main.py stays small while remaining the only entrypoint.
+LLM_CONFIG: dict[str, Any] = {
+    # Agent defaults to local llama.cpp Qwen3.6. For API runs, set
+    # backend="responses", provider="openrouter", model="openai/gpt-4.1-mini".
+    "backend": "llama_cpp",
+    "provider": "openai",
+    "model": "qwen3.6-35b-a3b",
     "adapter": None,
-    "specs": "data/benchmark/case_specs.json",
-    "resources": "data/benchmark/filtered_resources_tagged.csv",
-    "output_dir": None,
-    "limit_conversations": 250,
-    "max_turns": 8,
-    "agent_max_new_tokens": 256,
     "agent_temperature": 0.0,
-    "user_provider": "openai",
-    "user_model": "gpt-4.1-mini",
+    # User defaults to the same local model. Leave user_model=None to resolve
+    # from provider defaults.
+    "user_provider": "llama_cpp",
+    "user_model": None,
     "user_temperature": 0.0,
-    "user_max_output_tokens": 256,
-    "user_behaviors": ["rambling", "impatience", "self_contradictory", "unsupported_request"],
+}
+
+RUN_CONFIG: dict[str, Any] = {
+    "sample_count": 64,
+    "sample_seed": 1,
+    "sample_progress_every": 0,
+    "resources": Path("data/benchmark/filtered_resources_tagged.csv"),
+    "output_dir": None,
+    "max_agent_turns": 8,
+    "user_behaviors": ["normal", "rambling", "impatience", "self_contradictory", "unsupported_request"],
     "user_seed": 7,
     "jobs": 1,
-    "load_in_4bit": True,
 }
 
 
+PATH_FIELDS = {"adapter", "specs", "resources", "output_dir"}
+
+
 def main() -> None:
-    run_tool_call_eval(eval_args(CONFIG))
+    config = EvalConfig()
+    apply_config(config, LLM_CONFIG)
+    apply_config(config, RUN_CONFIG)
+    run_tool_call_eval(config)
 
 
-def eval_args(config: dict) -> Namespace:
-    return Namespace(
-        backend=config["backend"],
-        provider=config["provider"],
-        model=config["model"],
-        adapter=Path(config["adapter"]) if config["adapter"] else None,
-        specs=Path(config["specs"]),
-        resources=Path(config["resources"]),
-        output_dir=Path(config["output_dir"]) if config["output_dir"] else None,
-        limit_conversations=config["limit_conversations"],
-        max_agent_turns=config["max_turns"],
-        agent_max_new_tokens=config["agent_max_new_tokens"],
-        agent_temperature=config["agent_temperature"],
-        user_provider=config["user_provider"],
-        user_model=config["user_model"],
-        user_temperature=config["user_temperature"],
-        user_max_output_tokens=config["user_max_output_tokens"],
-        user_behaviors=config["user_behaviors"],
-        user_seed=config["user_seed"],
-        jobs=config["jobs"],
-        load_in_4bit=config["load_in_4bit"],
-    )
+def apply_config(eval_config: EvalConfig, values: dict[str, Any]) -> EvalConfig:
+    for key, value in values.items():
+        if not hasattr(eval_config, key):
+            raise KeyError(f"Unknown eval config key: {key}")
+        if key in PATH_FIELDS and value is not None:
+            value = Path(value)
+        setattr(eval_config, key, value)
+    return eval_config
 
 
 if __name__ == "__main__":

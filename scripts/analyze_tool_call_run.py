@@ -9,12 +9,15 @@ from typing import Any
 
 
 SCORE_KEYS = (
+    "tool_call_count_match",
     "service_match",
     "location_match",
     "schedule_match",
     "intake_match",
     "documents_match",
     "eligibility_match",
+    "resource_exact_match",
+    "end_to_end_match",
 )
 
 
@@ -32,7 +35,7 @@ def main() -> None:
 def print_behavior_table(records: list[dict[str, Any]]) -> None:
     grouped = group_by_behavior(records)
     normal_turns = {row["user_spec_id"]: agent_turn_count(row) for row in grouped.get("normal", [])}
-    print("behavior,n,all,valid,agent_turns_avg,agent_turns_median,user_msgs_avg,user_msgs_median,shorter_than_normal")
+    print("behavior,n,end_to_end,tool_all,resource,valid,agent_turns_avg,agent_turns_median,user_msgs_avg,user_msgs_median,shorter_than_normal")
     for behavior in sorted(grouped):
         rows = grouped[behavior]
         turns = [agent_turn_count(row) for row in rows]
@@ -48,7 +51,9 @@ def print_behavior_table(records: list[dict[str, Any]]) -> None:
                 (
                     behavior,
                     str(len(rows)),
+                    f"{rate(scores, 'end_to_end_match'):.3f}",
                     f"{rate(scores, 'all_match'):.3f}",
+                    f"{rate(scores, 'resource_exact_match'):.3f}",
                     f"{rate(scores, 'valid_tool_call'):.3f}",
                     f"{mean(turns):.2f}",
                     f"{median(turns):.1f}",
@@ -81,7 +86,11 @@ def print_examples(records: list[dict[str, Any]], limit: int) -> None:
         rows = sorted(grouped[behavior], key=lambda row: (row["score"].get("all_match", True), agent_turn_count(row)))
         print(f"\n[{behavior}]")
         for row in rows[:limit]:
-            print(f"{row['user_id']} all={row['score'].get('all_match')} valid={row['score'].get('valid_tool_call')} turns={agent_turn_count(row)}")
+            print(
+                f"{row['user_id']} e2e={row['score'].get('end_to_end_match')} "
+                f"tool_all={row['score'].get('all_match')} resource={row['score'].get('resource_exact_match')} "
+                f"valid={row['score'].get('valid_tool_call')} turns={agent_turn_count(row)}"
+            )
             for message in row.get("messages", [])[:6]:
                 content = str(message.get("content", "")).replace("\n", " ").strip()
                 if not content and message.get("tool_calls"):

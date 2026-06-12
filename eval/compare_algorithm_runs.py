@@ -8,6 +8,7 @@ from typing import Any
 
 METRIC_KEYS = (
     "valid_tool_call_rate",
+    "tool_call_count_match_rate",
     "service_match_rate",
     "location_match_rate",
     "schedule_match_rate",
@@ -15,6 +16,8 @@ METRIC_KEYS = (
     "documents_match_rate",
     "eligibility_match_rate",
     "all_match_rate",
+    "resource_exact_match_rate",
+    "end_to_end_match_rate",
 )
 
 
@@ -72,8 +75,8 @@ def main_table(stats: list[tuple[str, Path, dict[str, Any]]]) -> list[str]:
     lines = [
         "## Overall",
         "",
-        "| Method | Cases | All | Valid | Service | Location | Schedule | Intake | Documents | Eligibility |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Method | Cases | E2E | Tool All | Resource | Valid | Calls | Service | Location | Schedule | Intake | Documents | Eligibility |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, _path, stat in stats:
         overall = stat["summary"]["overall"]
@@ -83,8 +86,11 @@ def main_table(stats: list[tuple[str, Path, dict[str, Any]]]) -> list[str]:
                 [
                     name,
                     str(overall.get("n", 0)),
+                    fmt(overall.get("end_to_end_match_rate")),
                     fmt(overall.get("all_match_rate")),
+                    fmt(overall.get("resource_exact_match_rate")),
                     fmt(overall.get("valid_tool_call_rate")),
+                    fmt(overall.get("tool_call_count_match_rate")),
                     fmt(overall.get("service_match_rate")),
                     fmt(overall.get("location_match_rate")),
                     fmt(overall.get("schedule_match_rate")),
@@ -109,15 +115,16 @@ def behavior_tables(stats: list[tuple[str, Path, dict[str, Any]]]) -> list[str]:
     lines = [
         "## By Behavior",
         "",
-        "| Method | Behavior | N | All | Valid | Location |",
-        "|---|---|---:|---:|---:|---:|",
+        "| Method | Behavior | N | E2E | Tool All | Resource | Valid | Location |",
+        "|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     for name, _path, stat in stats:
         by_behavior = stat["summary"].get("by_user_behavior", {})
         for behavior in behaviors:
             row = by_behavior.get(behavior, {"n": 0})
             lines.append(
-                f"| {name} | {behavior} | {row.get('n', 0)} | {fmt(row.get('all_match_rate'))} | "
+                f"| {name} | {behavior} | {row.get('n', 0)} | {fmt(row.get('end_to_end_match_rate'))} | "
+                f"{fmt(row.get('all_match_rate'))} | {fmt(row.get('resource_exact_match_rate'))} | "
                 f"{fmt(row.get('valid_tool_call_rate'))} | {fmt(row.get('location_match_rate'))} |"
             )
     return lines
@@ -127,24 +134,28 @@ def diagnostic_table(stats: list[tuple[str, Path, dict[str, Any]]]) -> list[str]
     lines = [
         "## Diagnostics",
         "",
-        "| Method | Parse None | Parse None Rate | Avg Agent Turns |",
-        "|---|---:|---:|---:|",
+        "| Method | Parse None | Parse None Rate | Avg Agent Turns | Avg Resource Precision | Avg Resource Recall |",
+        "|---|---:|---:|---:|---:|---:|",
     ]
     for name, _path, stat in stats:
         cases = stat["summary"]["overall"].get("n", 0)
         parse_none = stat["parse_none"]
         parse_none_rate = parse_none / cases if cases else 0.0
-        lines.append(f"| {name} | {parse_none} | {fmt(parse_none_rate)} | {stat['avg_agent_turns']:.2f} |")
+        overall = stat["summary"]["overall"]
+        lines.append(
+            f"| {name} | {parse_none} | {fmt(parse_none_rate)} | {stat['avg_agent_turns']:.2f} | "
+            f"{fmt(overall.get('resource_precision_avg'))} | {fmt(overall.get('resource_recall_avg'))} |"
+        )
     return lines
 
 
 def field_failure_table(stats: list[tuple[str, Path, dict[str, Any]]]) -> list[str]:
-    fields = ("service", "location", "schedule", "intake", "documents", "eligibility")
+    fields = ("tool_call_count", "service", "location", "schedule", "intake", "documents", "eligibility", "resource_selection", "end_to_end")
     lines = [
         "## Field Failures",
         "",
-        "| Method | Service | Location | Schedule | Intake | Documents | Eligibility |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| Method | Calls | Service | Location | Schedule | Intake | Documents | Eligibility | Resource | E2E |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, _path, stat in stats:
         failures = stat["field_failures"]

@@ -4,17 +4,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent.llm import create_response_with_retries, make_openai_client
-from eval.tool_call_parsers import ParsedToolCall, parse_qwen_xml_tool_call, parse_responses_tool_call
+from agent.llm import create_chat_completion_with_retries, create_response_with_retries, make_openai_client
+from eval.tool_call_parsers import ParsedToolCall, parse_qwen_xml_tool_calls, parse_responses_tool_calls
 from eval.tool_call_prompts import AGENT_SYSTEM_PROMPT
+
+
+AGENT_GENERATION_TOKEN_LIMIT = 8192
 
 
 @dataclass
 class BackendOutput:
     text: str
-    tool_call: ParsedToolCall | None
+    tool_calls: list[ParsedToolCall]
     raw: Any = None
     token_usage: dict[str, int] | None = None
+
+    @property
+    def tool_call(self) -> ParsedToolCall | None:
+        return self.tool_calls[0] if self.tool_calls else None
 
 
 class AgentBackend:
@@ -27,7 +34,6 @@ class LocalHFBackend(AgentBackend):
         self,
         model_name: str,
         adapter: Path | None = None,
-        max_new_tokens: int = 256,
         temperature: float = 0.0,
         load_in_4bit: bool = True,
     ):
@@ -35,7 +41,7 @@ class LocalHFBackend(AgentBackend):
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
         self.torch = torch
-        self.max_new_tokens = max_new_tokens
+        self.max_new_tokens = AGENT_GENERATION_TOKEN_LIMIT
         self.temperature = temperature
         tokenizer_path = str(adapter or model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -83,7 +89,7 @@ class LocalHFBackend(AgentBackend):
         with self.torch.no_grad():
             outputs = self.model.generate(**inputs, **generation_args)
         text = self.tokenizer.decode(outputs[0, inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
-        return BackendOutput(text=text, tool_call=parse_qwen_xml_tool_call(text))
+        return BackendOutput(text=text, tool_calls=parse_qwen_xml_tool_calls(text))
 
     def _chat_prompt(self, messages: list[dict[str, Any]], tool_schema: dict[str, Any]) -> str:
         tools = [qwen_tool_schema(tool_schema)]
@@ -109,6 +115,7 @@ class ResponsesAPIBackend(AgentBackend):
             instructions=AGENT_SYSTEM_PROMPT,
             tools=[tool_schema],
             input=messages,
+            max_output_tokens=AGENT_GENERATION_TOKEN_LIMIT,
         )
         token_usage = empty_token_usage()
         add_response_usage(token_usage, response)
@@ -116,9 +123,49 @@ class ResponsesAPIBackend(AgentBackend):
         raw = response.model_dump(mode="json") if hasattr(response, "model_dump") else None
         return BackendOutput(
             text=text,
-            tool_call=parse_responses_tool_call(response),
+            tool_calls=parse_responses_tool_calls(response),
             raw=raw,
             token_usage=token_usage,
+        )
+
+
+class LlamaCppServerBackend(AgentBackend):
+    def __init__(self, model: str, temperature: float = 0.0):
+        self.client = make_openai_client("llama_cpp")
+        self.model = model
+        self.max_tokens = AGENT_GENERATION_TOKEN_LIMIT
+        self.temperature = temperature
+
+    def generate(self, messages: list[dict[str, Any]], tool_schema: dict[str, Any]) -> BackendOutput:
+        response = create_chat_completion_with_retries(
+            self.client,
+            model=self.model,
+            messages=[
+                {"role": "system", "content": self._system_prompt(tool_schema)},
+                *messages,
+            ],
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+        )
+        choice = response.choices[0] if response.choices else None
+        message = choice.message if choice is not None else None
+        text = (getattr(message, "content", None) or "").strip()
+        raw = response.model_dump(mode="json") if hasattr(response, "model_dump") else None
+        token_usage = empty_token_usage()
+        add_chat_completion_usage(token_usage, response)
+        return BackendOutput(
+            text=text,
+            tool_calls=parse_qwen_xml_tool_calls(text),
+            raw=raw,
+            token_usage=token_usage,
+        )
+
+    def _system_prompt(self, tool_schema: dict[str, Any]) -> str:
+        schema_text = json_dumps(qwen_tool_schema(tool_schema))
+        return (
+            f"{AGENT_SYSTEM_PROMPT}\n\n"
+            "Tool schema for search_resources:\n"
+            f"{schema_text}"
         )
 
 
@@ -139,7 +186,6 @@ def backend_metadata(args) -> dict[str, Any]:
         "provider",
         "model",
         "adapter",
-        "agent_max_new_tokens",
         "agent_temperature",
         "load_in_4bit",
     )
@@ -149,17 +195,22 @@ def backend_metadata(args) -> dict[str, Any]:
         if isinstance(value, Path):
             value = str(value)
         result[key] = value
+    result["agent_generation_token_limit"] = AGENT_GENERATION_TOKEN_LIMIT
     return result
 
 
 def make_backend(args) -> AgentBackend:
+    if args.backend == "llama_cpp":
+        return LlamaCppServerBackend(
+            model=args.model,
+            temperature=args.agent_temperature,
+        )
     if args.backend == "responses":
         return ResponsesAPIBackend(args.provider, args.model)
     if args.backend == "local":
         return LocalHFBackend(
             model_name=args.model,
             adapter=args.adapter,
-            max_new_tokens=args.agent_max_new_tokens,
             temperature=args.agent_temperature,
             load_in_4bit=args.load_in_4bit,
         )
@@ -176,6 +227,21 @@ def add_response_usage(total: dict[str, int], response: Any) -> None:
         return
     for key in ("input_tokens", "output_tokens", "total_tokens"):
         total[key] += int(_usage_attr(usage, key) or 0)
+
+
+def add_chat_completion_usage(total: dict[str, int], response: Any) -> None:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    total["input_tokens"] += int(_usage_attr(usage, "prompt_tokens") or 0)
+    total["output_tokens"] += int(_usage_attr(usage, "completion_tokens") or 0)
+    total["total_tokens"] += int(_usage_attr(usage, "total_tokens") or 0)
+
+
+def json_dumps(value: Any) -> str:
+    import json
+
+    return json.dumps(value, ensure_ascii=False, indent=2)
 
 
 def _usage_attr(usage: Any, name: str) -> Any:

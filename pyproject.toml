@@ -1,26 +1,33 @@
 [project]
 name = "211-agent"
 version = "0.1.0"
-description = "Resource search agent prototype"
+description = "Indiana 211 resource-search evaluation benchmark"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "openai>=2.33.0",
+    "tqdm>=4.67.0",
+]
+
+[project.optional-dependencies]
+builder = [
+    "ipykernel>=7.2.0",
+    "pandas>=2.2.0",
+]
+local-hf = [
     "accelerate>=1.13.0",
     "bitsandbytes>=0.49.2",
-    "datasets>=5.0.0",
-    "ipykernel>=7.2.0",
-    "jsonlines>=4.0.0",
-    "jsonschema>=4.26.0",
-    "openai>=2.33.0",
-    "pandas>=2.2.0",
     "peft==0.15.2",
-    "rich>=15.0.0",
     "safetensors>=0.7.0",
-    "scikit-learn>=1.9.0",
     "sentencepiece>=0.2.1",
-    "tensorboard>=2.20.0",
     "torch==2.6.0",
     "transformers==4.51.3",
+]
+archive-training = [
+    "datasets>=5.0.0",
+    "jsonlines>=4.0.0",
+    "scikit-learn>=1.9.0",
+    "tensorboard>=2.20.0",
     "trl==0.17.0",
 ]
 

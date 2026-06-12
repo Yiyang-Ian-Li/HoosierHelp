@@ -5,6 +5,9 @@ data/mvp*/
 tests/
 experiments/
 paper/
+.agents/
+.codex/
+archive/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

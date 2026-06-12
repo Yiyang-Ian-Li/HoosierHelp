@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from statistics import mean, median
@@ -12,55 +12,95 @@ from typing import Any
 
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from eval.llm_user import LLMSimulatedUser
+from agent.llm import is_llama_cpp_provider
+from eval.llm_user import LLMSimulatedUser, USER_GENERATION_TOKEN_LIMIT
+from eval.spec_generation import build_user_specs
 from eval.tool_call_backends import backend_metadata, make_backend
 from eval.tool_call_parsers import clean_tool_call_text
-from eval.tool_call_schema import USER_BEHAVIORS, normalize_tool_args, tool_arg_scores
-from tools.indiana211 import load_resource_index, search_resources_tool_schema
+from eval.tool_call_schema import (
+    normalize_tool_args,
+    parse_selected_resource_ids,
+    score_resource_selection_by_need,
+    score_tool_calls,
+)
+from tools.indiana211 import (
+    DEFAULT_RESULT_LIMIT,
+    execute_search_resources,
+    load_resource_index,
+    search_resources_tool_schema,
+)
 
 
-DEFAULT_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
-DEFAULT_EXTRA_USER_BEHAVIORS = ("rambling", "impatience", "self_contradictory", "unsupported_request")
+DEFAULT_MODEL = "qwen3.6-35b-a3b"
+DEFAULT_OPENAI_USER_MODEL = "gpt-4.1-mini"
+DEFAULT_OPENROUTER_USER_MODEL = "openai/gpt-4.1-mini"
+DEFAULT_USER_BEHAVIORS = ("normal", "rambling", "impatience", "self_contradictory", "unsupported_request")
 
 
-def run(args: argparse.Namespace) -> Path:
-    args.output_dir = resolve_output_dir(args)
-    specs = read_specs(args.specs)
-    tool_schema = search_resources_tool_schema(load_resource_index(args.resources))
-    expanded = expand_specs(specs, args.limit_conversations, selected_user_behaviors(args))
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    write_json(args.output_dir / "args.json", serializable_args(args))
-    records_path = args.output_dir / "records.jsonl"
+@dataclass
+class EvalConfig:
+    specs: Path | None = None
+    sample_count: int = 64
+    sample_seed: int = 20260611
+    sample_progress_every: int = 0
+    resources: Path = Path("data/benchmark/filtered_resources_tagged.csv")
+    output_dir: Path | None = None
+    backend: str = "llama_cpp"
+    provider: str = "openai"
+    model: str = DEFAULT_MODEL
+    adapter: Path | None = None
+    max_agent_turns: int = 8
+    tool_result_limit: int = DEFAULT_RESULT_LIMIT
+    agent_temperature: float = 0.0
+    user_provider: str = "llama_cpp"
+    user_model: str | None = None
+    user_temperature: float = 0.0
+    user_behaviors: list[str] = field(default_factory=lambda: list(DEFAULT_USER_BEHAVIORS))
+    user_seed: int = 7
+    jobs: int = 1
+    load_in_4bit: bool = True
+
+
+def run(config: EvalConfig) -> Path:
+    resolve_user_model(config)
+    config.output_dir = resolve_output_dir(config)
+    resource_index = load_resource_index(config.resources)
+    specs = load_or_generate_specs(config, resource_index)
+    tool_schema = search_resources_tool_schema(resource_index)
+    expanded = expand_specs(specs, selected_user_behaviors(config))
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    write_json(config.output_dir / "args.json", serializable_run_config(config))
+    write_json(config.output_dir / "generated_specs.json", specs)
+    records_path = config.output_dir / "records.jsonl"
     records_path.write_text("", encoding="utf-8")
-    records = evaluate_all(expanded, tool_schema, args, records_path)
+    records = evaluate_all(expanded, tool_schema, resource_index, config, records_path)
     summary = summarize(records)
-    write_json(args.output_dir / "summary.json", summary)
+    write_json(config.output_dir / "summary.json", summary)
     print(json.dumps(summary, indent=2, ensure_ascii=False))
-    return args.output_dir
+    return config.output_dir
 
 
 def evaluate_all(
     expanded: list[tuple[dict[str, Any], str]],
     tool_schema: dict[str, Any],
-    args: argparse.Namespace,
+    resource_index,
+    config: EvalConfig,
     records_path: Path,
 ) -> list[dict[str, Any]]:
     if not expanded:
         return []
     records = []
-    if args.backend == "local" or args.jobs == 1:
-        backend = make_backend(args)
+    if config.backend == "local" or config.jobs == 1:
+        backend = make_backend(config)
         with records_path.open("a", encoding="utf-8") as handle:
             for spec, user_behavior in tqdm(expanded, desc="tool-call eval"):
-                record = evaluate_conversation(spec, user_behavior, tool_schema, backend, args)
+                record = evaluate_conversation(spec, user_behavior, tool_schema, resource_index, backend, config)
                 records.append(record)
                 write_jsonl_row(handle, record)
         return records
-    with ThreadPoolExecutor(max_workers=args.jobs) as executor:
+    with ThreadPoolExecutor(max_workers=config.jobs) as executor:
         futures = {
-            executor.submit(evaluate_conversation, spec, user_behavior, tool_schema, make_backend(args), args): (spec, user_behavior)
+            executor.submit(evaluate_conversation, spec, user_behavior, tool_schema, resource_index, make_backend(config), config): (spec, user_behavior)
             for spec, user_behavior in expanded
         }
         with records_path.open("a", encoding="utf-8") as handle:
@@ -76,47 +116,58 @@ def evaluate_conversation(
     spec: dict[str, Any],
     user_behavior: str,
     tool_schema: dict[str, Any],
+    resource_index,
     backend,
-    args: argparse.Namespace,
+    config: EvalConfig,
 ) -> dict[str, Any]:
     messages: list[dict[str, Any]] = []
     user = LLMSimulatedUser(
         spec=spec,
         user_behavior=user_behavior,
-        provider=args.user_provider,
-        model=args.user_model,
-        seed=args.user_seed,
-        temperature=args.user_temperature,
-        max_output_tokens=args.user_max_output_tokens,
+        provider=config.user_provider,
+        model=config.user_model,
+        seed=config.user_seed,
+        temperature=config.user_temperature,
     )
     messages.append({"role": "user", "content": user.opening()})
     raw_agent_outputs = []
-    predicted_tool_call = None
-    parse_mode = "none"
+    predicted_tool_calls = []
+    parse_modes = []
+    executed_tool_results = []
+    final_text = ""
     token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
-    for _ in range(args.max_agent_turns):
+    for _ in range(config.max_agent_turns):
         output = backend.generate(messages, tool_schema)
         raw_agent_outputs.append(output.text)
         add_token_usage(token_usage, output.token_usage or {})
-        if output.tool_call is not None:
-            predicted_tool_call = output.tool_call.arguments
-            parse_mode = output.tool_call.parse_mode
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "type": "function",
-                            "function": {
-                                "name": output.tool_call.name,
-                                "arguments": predicted_tool_call,
-                            },
-                        }
-                    ],
-                }
-            )
+        if output.tool_calls:
+            messages.append({"role": "assistant", "content": output.text})
+            for call_index, tool_call in enumerate(output.tool_calls, start=1):
+                predicted_tool_calls.append(tool_call.arguments)
+                parse_modes.append(tool_call.parse_mode)
+                result = execute_search_resources(resource_index, tool_call.arguments, limit=config.tool_result_limit)
+                executed_tool_results.append(
+                    {
+                        "call_index": len(predicted_tool_calls),
+                        "arguments": normalize_tool_args(tool_call.arguments),
+                        "result": result,
+                    }
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Tool result for search_resources call {call_index}:\n"
+                            f"{json.dumps(result, ensure_ascii=False)}\n"
+                            "Now choose the best returned resource_id or resource_ids for the original user."
+                        ),
+                    }
+                )
+            continue
+        if predicted_tool_calls:
+            final_text = clean_tool_call_text(output.text)
+            messages.append({"role": "assistant", "content": final_text})
             break
         assistant_text = clean_tool_call_text(output.text)
         messages.append({"role": "assistant", "content": assistant_text})
@@ -125,16 +176,36 @@ def evaluate_conversation(
             break
         messages.append({"role": "user", "content": user_reply})
 
-    expected = expected_tool_args(spec)
-    score = tool_arg_scores(predicted_tool_call, expected)
+    expected = expected_tool_calls(spec)
+    expected_resource_ids = expected_resource_ids_from_spec(spec)
+    acceptable_resource_ids_by_need = acceptable_resource_ids_for_expected_calls(resource_index, expected, config.tool_result_limit)
+    predicted_resource_ids = normalize_selected_resource_ids(
+        parse_selected_resource_ids(final_text),
+        executed_tool_results,
+    )
+    tool_score = score_tool_calls(predicted_tool_calls, expected)
+    resource_score = score_resource_selection_by_need(predicted_resource_ids, acceptable_resource_ids_by_need)
+    score = {
+        **tool_score,
+        **resource_score,
+        "end_to_end_match": bool(tool_score["all_match"]) and bool(resource_score["resource_exact_match"]),
+    }
     return {
         "user_spec_id": user_spec_id(spec),
         "user_id": f"{user_spec_id(spec)}__{user_behavior}",
         "user_behavior": user_behavior,
-        "backend": backend_metadata(args),
-        "expected_tool_call": expected,
-        "predicted_tool_call": normalize_tool_args(predicted_tool_call or {}) if predicted_tool_call else None,
-        "parse_mode": parse_mode,
+        "backend": backend_metadata(config),
+        "case_type": spec.get("case_type") or ("composite" if len(spec.get("needs") or []) > 1 else "single"),
+        "constraint_profile": spec.get("constraint_profile") or "all_hard",
+        "expected_tool_calls": expected,
+        "predicted_tool_calls": [normalize_tool_args(call) for call in predicted_tool_calls],
+        "expected_resource_ids": expected_resource_ids,
+        "acceptable_resource_ids_by_need": acceptable_resource_ids_by_need,
+        "predicted_resource_ids": predicted_resource_ids,
+        "final_text": final_text,
+        "executed_tool_results": executed_tool_results,
+        "parse_mode": parse_modes[0] if parse_modes else "none",
+        "parse_modes": parse_modes,
         "score": score,
         "messages": messages,
         "raw_agent_outputs": raw_agent_outputs,
@@ -144,10 +215,10 @@ def evaluate_conversation(
             "contradiction_used": user.contradiction_used,
         },
         "user_backend": {
-            "provider": args.user_provider,
-            "model": args.user_model,
-            "temperature": args.user_temperature,
-            "max_output_tokens": args.user_max_output_tokens,
+            "provider": config.user_provider,
+            "model": config.user_model,
+            "temperature": config.user_temperature,
+            "generation_token_limit": USER_GENERATION_TOKEN_LIMIT,
         },
         "token_usage": token_usage,
     }
@@ -167,9 +238,68 @@ def expected_tool_args(spec: dict[str, Any]) -> dict[str, Any]:
     return normalize_tool_args(args)
 
 
+def expected_tool_calls(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    needs = spec.get("needs")
+    if isinstance(needs, list) and needs:
+        return [expected_tool_args_for_need(need) for need in needs if isinstance(need, dict)]
+    return [expected_tool_args(spec)]
+
+
+def expected_tool_args_for_need(need: dict[str, Any]) -> dict[str, Any]:
+    args = {
+        "service_categories": need.get("service_categories") or [],
+        "schedule": need.get("schedule") or {},
+        "intake_methods": need.get("intake_methods") or [],
+        "available_documents": need.get("available_documents") or [],
+        "eligibility": need.get("eligibility") or [],
+    }
+    location = need.get("location") or {}
+    for key in ("counties", "cities", "zipcodes"):
+        args[key] = location.get(key) or []
+    return normalize_tool_args(args)
+
+
+def expected_resource_ids_from_spec(spec: dict[str, Any]) -> list[str]:
+    resources = spec.get("ground_truth_resources")
+    if isinstance(resources, list) and resources:
+        return [str(item.get("resource_id")) for item in resources if isinstance(item, dict) and item.get("resource_id")]
+    if spec.get("source_resource_id"):
+        return [str(spec["source_resource_id"])]
+    return []
+
+
+def acceptable_resource_ids_for_expected_calls(resource_index, expected_calls: list[dict[str, Any]], limit: int) -> list[list[str]]:
+    acceptable = []
+    for call in expected_calls:
+        result = execute_search_resources(resource_index, call, limit=limit)
+        acceptable.append([str(item["resource_id"]) for item in result.get("resources", []) if item.get("resource_id")])
+    return acceptable
+
+
+def normalize_selected_resource_ids(predicted_ids: list[str], executed_tool_results: list[dict[str, Any]]) -> list[str]:
+    candidates = []
+    for item in executed_tool_results:
+        result = item.get("result") or {}
+        for resource in result.get("resources") or []:
+            resource_id = str(resource.get("resource_id") or "")
+            if resource_id and resource_id not in candidates:
+                candidates.append(resource_id)
+    normalized = []
+    for predicted in predicted_ids:
+        resolved = predicted
+        if predicted not in candidates:
+            matches = [candidate for candidate in candidates if candidate.startswith(predicted)]
+            if len(matches) == 1:
+                resolved = matches[0]
+        if resolved not in normalized:
+            normalized.append(resolved)
+    return normalized
+
+
 def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
     keys = [
         "valid_tool_call",
+        "tool_call_count_match",
         "service_match",
         "location_match",
         "schedule_match",
@@ -177,6 +307,8 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
         "documents_match",
         "eligibility_match",
         "all_match",
+        "resource_exact_match",
+        "end_to_end_match",
     ]
     parse_modes = Counter(record["parse_mode"] for record in records)
     return {
@@ -185,6 +317,29 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
         "by_user_behavior": {
             user_behavior: aggregate([record["score"] for record in records if record["user_behavior"] == user_behavior], keys)
             for user_behavior in sorted({record["user_behavior"] for record in records})
+        },
+        "by_case_type": {
+            case_type: aggregate([record["score"] for record in records if record.get("case_type") == case_type], keys)
+            for case_type in sorted({record.get("case_type") for record in records})
+        },
+        "by_constraint_profile": {
+            profile: aggregate([record["score"] for record in records if record.get("constraint_profile") == profile], keys)
+            for profile in sorted({record.get("constraint_profile") for record in records})
+        },
+        "by_case_type_constraint_behavior": {
+            f"{case_type}__{profile}__{behavior}": aggregate(
+                [
+                    record["score"]
+                    for record in records
+                    if record.get("case_type") == case_type
+                    and record.get("constraint_profile") == profile
+                    and record.get("user_behavior") == behavior
+                ],
+                keys,
+            )
+            for case_type in sorted({record.get("case_type") for record in records})
+            for profile in sorted({record.get("constraint_profile") for record in records})
+            for behavior in sorted({record.get("user_behavior") for record in records})
         },
         "parse_modes": dict(sorted(parse_modes.items())),
         "parse_none_rate": parse_modes.get("none", 0) / len(records) if records else 0.0,
@@ -206,7 +361,11 @@ def aggregate(scores: list[dict[str, bool]], keys: list[str]) -> dict[str, float
     if not scores:
         return {"n": 0}
     total = len(scores)
-    return {f"{key}_rate": sum(bool(score.get(key)) for score in scores) / total for key in keys} | {"n": total}
+    result = {f"{key}_rate": sum(bool(score.get(key)) for score in scores) / total for key in keys} | {"n": total}
+    result["resource_precision_avg"] = mean(float(score.get("resource_precision") or 0.0) for score in scores)
+    result["resource_recall_avg"] = mean(float(score.get("resource_recall") or 0.0) for score in scores)
+    result["predicted_tool_call_count_avg"] = mean(float(score.get("predicted_call_count") or 0.0) for score in scores)
+    return result
 
 
 def turn_stats(records: list[dict[str, Any]]) -> dict[str, float]:
@@ -245,32 +404,52 @@ def token_usage_summary(records: list[dict[str, Any]]) -> dict[str, int | float]
 def failure_counts(records: list[dict[str, Any]]) -> dict[str, int]:
     fields = {
         "invalid_tool_call": "valid_tool_call",
+        "tool_call_count": "tool_call_count_match",
         "service": "service_match",
         "location": "location_match",
         "schedule": "schedule_match",
         "intake": "intake_match",
         "documents": "documents_match",
         "eligibility": "eligibility_match",
+        "resource_selection": "resource_exact_match",
+        "end_to_end": "end_to_end_match",
         "not_all_match": "all_match",
     }
     return {
         label: sum(not bool(record.get("score", {}).get(score_key)) for record in records)
         for label, score_key in fields.items()
     } | {"n": len(records)}
-    return {
-        field: sum(not bool(record.get("score", {}).get(field)) for record in records)
-        for field in fields
-    } | {"n": len(records)}
 
 
-def selected_user_behaviors(args: argparse.Namespace) -> tuple[str, ...]:
-    user_behaviors = ["normal", *(args.user_behaviors or DEFAULT_EXTRA_USER_BEHAVIORS)]
+def selected_user_behaviors(config: EvalConfig) -> tuple[str, ...]:
+    user_behaviors = [*(config.user_behaviors or DEFAULT_USER_BEHAVIORS)]
     return tuple(dict.fromkeys(user_behaviors))
 
 
-def expand_specs(specs: list[dict[str, Any]], limit: int, user_behaviors: tuple[str, ...]) -> list[tuple[dict[str, Any], str]]:
-    rows = [(spec, user_behavior) for spec in specs for user_behavior in user_behaviors]
-    return rows[:limit] if limit else rows
+def resolve_user_model(config: EvalConfig) -> None:
+    if config.user_model:
+        return
+    if is_llama_cpp_provider(config.user_provider):
+        config.user_model = config.model
+    elif config.user_provider == "openrouter":
+        config.user_model = DEFAULT_OPENROUTER_USER_MODEL
+    else:
+        config.user_model = DEFAULT_OPENAI_USER_MODEL
+
+
+def load_or_generate_specs(config: EvalConfig, resource_index) -> list[dict[str, Any]]:
+    if config.specs is not None:
+        return read_specs(config.specs)
+    return build_user_specs(
+        resource_index.resources,
+        count=config.sample_count,
+        seed=config.sample_seed,
+        progress_every=config.sample_progress_every,
+    )
+
+
+def expand_specs(specs: list[dict[str, Any]], user_behaviors: tuple[str, ...]) -> list[tuple[dict[str, Any], str]]:
+    return [(spec, user_behavior) for spec in specs for user_behavior in user_behaviors]
 
 
 def user_spec_id(spec: dict[str, Any]) -> str:
@@ -301,18 +480,17 @@ def write_jsonl_row(handle, row: dict[str, Any]) -> None:
     handle.flush()
 
 
-def resolve_output_dir(args: argparse.Namespace) -> Path:
-    explicit = getattr(args, "output_dir", None)
+def resolve_output_dir(config: EvalConfig) -> Path:
+    explicit = getattr(config, "output_dir", None)
     if explicit is not None:
         return Path(explicit)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    spec_name = slug(Path(args.specs).stem)
-    model_name = slug(str(args.model).split("/")[-1])
-    adapter = getattr(args, "adapter", None)
+    spec_name = slug(Path(config.specs).stem) if getattr(config, "specs", None) else f"samples{int(config.sample_count)}-seed{int(config.sample_seed)}"
+    model_name = slug(str(config.model).split("/")[-1])
+    adapter = getattr(config, "adapter", None)
     adapter_name = f"adapter-{slug(Path(adapter).parent.name if Path(adapter).name == 'adapter' else Path(adapter).name)}" if adapter else "base"
-    limit = int(getattr(args, "limit_conversations", 0) or 0)
-    limit_name = f"n{limit}" if limit else "all"
-    run_name = "__".join([spec_name, slug(args.backend), model_name, adapter_name, limit_name, timestamp])
+    behavior_name = f"behaviors{len(selected_user_behaviors(config))}"
+    run_name = "__".join([spec_name, slug(config.backend), model_name, adapter_name, behavior_name, timestamp])
     return Path("experiments/tool_call_eval") / run_name
 
 
@@ -331,43 +509,20 @@ def slug(value: str) -> str:
     return text or "run"
 
 
-def serializable_args(args: argparse.Namespace) -> dict[str, Any]:
-    values = vars(args).copy()
+def serializable_run_config(config: EvalConfig) -> dict[str, Any]:
+    values = vars(config).copy()
     for key, value in values.items():
         if isinstance(value, Path):
             values[key] = str(value)
         elif isinstance(value, tuple):
             values[key] = list(value)
-    return {"command": sys.argv, "args": values}
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate search_resources tool-call argument correctness.")
-    parser.add_argument("--specs", type=Path, default=Path("data/benchmark/case_specs.json"))
-    parser.add_argument("--resources", type=Path, default=Path("data/benchmark/filtered_resources_tagged.csv"))
-    parser.add_argument("--output-dir", type=Path, help="Directory for args.json, records.jsonl, and summary.json. Defaults to a timestamped directory under experiments/tool_call_eval/.")
-    parser.add_argument("--backend", choices=["local", "responses"], default="local")
-    parser.add_argument("--provider", choices=["openai", "openrouter"], default="openai")
-    parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--adapter", type=Path)
-    parser.add_argument("--limit-conversations", type=int, default=0)
-    parser.add_argument("--max-agent-turns", type=int, default=8)
-    parser.add_argument("--agent-max-new-tokens", type=int, default=256)
-    parser.add_argument("--agent-temperature", type=float, default=0.0)
-    parser.add_argument("--user-provider", choices=["openai", "openrouter"], default="openai")
-    parser.add_argument("--user-model", default="gpt-4.1-mini")
-    parser.add_argument("--user-temperature", type=float, default=0.7)
-    parser.add_argument("--user-max-output-tokens", type=int, default=180)
-    parser.add_argument("--user-behaviors", nargs="+", choices=[behavior for behavior in USER_BEHAVIORS if behavior != "normal"], default=list(DEFAULT_EXTRA_USER_BEHAVIORS))
-    parser.add_argument("--user-seed", type=int, default=7)
-    parser.add_argument("--jobs", type=int, default=1)
-    parser.add_argument("--load-in-4bit", action="store_true", default=True)
-    parser.add_argument("--no-4bit", dest="load_in_4bit", action="store_false")
-    return parser.parse_args(argv)
+    values["agent_generation_token_limit"] = backend_metadata(config)["agent_generation_token_limit"]
+    values["user_generation_token_limit"] = USER_GENERATION_TOKEN_LIMIT
+    return {"command": sys.argv, "config": values}
 
 
 def main() -> None:
-    run(parse_args())
+    raise SystemExit("Use `uv run python main.py` as the evaluation entrypoint.")
 
 
 if __name__ == "__main__":

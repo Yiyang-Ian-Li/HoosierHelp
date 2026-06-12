@@ -5,7 +5,12 @@ import random
 from dataclasses import dataclass, field
 from typing import Any
 
-from agent.llm import create_response_with_retries, make_openai_client
+from agent.llm import (
+    create_chat_completion_with_retries,
+    create_response_with_retries,
+    is_llama_cpp_provider,
+    make_openai_client,
+)
 
 
 USER_SYSTEM_PROMPT = """You are simulating a person asking for help finding Indiana community resources.
@@ -25,13 +30,15 @@ BEHAVIOR_INSTRUCTIONS = {
     "rambling": """Behavior:
 - Opening: state the service need, but include extra background noise or an unrelated worry/question.
 - Follow-ups: answer the information areas the agent asked about, and add noisy background, unnecessary distractor facts, or off-topic questions.
+- Noisy background must not contain any city, county, ZIP code, day, time, intake method, document, eligibility trait, or service need unless it is present in the available facts for this reply.
+- Keep noisy background mundane and realistic, limited to being distracted, folding laundry, paperwork on the table, a phone notification, or waiting on a routine callback. Do not mention children, family needs, bills, housing, food, utilities, transportation help, appliance problems, safety concerns, medical issues, legal issues, money needs, jokes, surreal comments, or animal-related tangents.
 - Do not provide valid search facts the agent did not ask for.""",
     "self_contradictory": """Behavior:
 - Opening: directly state the service need only.
 - Follow-ups: answer the information areas the agent asked about.
 - One information area is selected as your contradiction slot. Only contradict yourself when answering that selected slot.
 - A self-contradiction means you assert a fact or requirement and also deny that same fact or requirement in the same reply.
-- Do not give multiple acceptable options, such as "A or B", "both A and B", or "either is fine". Multiple acceptable options are normal constraints, not self-contradictions.
+- If the available facts contain multiple acceptable options, those options are normal constraints, not self-contradictions.
 - If the agent asks again to clarify or confirm the contradiction, answer normally with the real fact.
 - Do not present the contradiction as a correction. Do not use words such as actually, sorry, or I mean.""",
     "impatience": """Behavior:
@@ -56,6 +63,9 @@ SLOT_GROUPS = (
 )
 
 
+USER_GENERATION_TOKEN_LIMIT = 8192
+
+
 @dataclass
 class LLMSimulatedUser:
     spec: dict[str, Any]
@@ -63,8 +73,7 @@ class LLMSimulatedUser:
     provider: str
     model: str
     seed: int | None = None
-    temperature: float = 0.7
-    max_output_tokens: int = 180
+    temperature: float = 0.0
     turn: int = 0
     client: Any = None
     contradiction_area: str | None = None
@@ -101,21 +110,45 @@ class LLMSimulatedUser:
                 turn_instruction,
                 "Facts available for this reply:\n" + json.dumps(hidden_user_facts(self.spec, visible_areas), ensure_ascii=False, indent=2),
                 "Do not state, hint at, or invent valid search facts that are not included in the facts available for this reply.",
+                "Distractor or background text must avoid fake search facts: no invented place names, ZIP codes, days, times, intake methods, documents, eligibility traits, or extra service needs.",
                 "Do not mention information areas that are not available for this reply, even to say no preference, none, unknown, or no information.",
                 "If an available requested area is an empty list or empty object, answer naturally that you have no specific information, no requirement, or no preference for that area.",
                 "Write exactly one user reply. Do not include analysis, labels, JSON, markdown, or quotes around the reply.",
             )
         )
+        if is_llama_cpp_provider(self.provider):
+            text = self._generate_chat_completion(messages, context)
+        else:
+            text = self._generate_responses_api(messages, context)
+        self.provided_areas.update(area for area in visible_areas if area != "service")
+        return text.strip()
+
+    def _generate_responses_api(self, messages: list[dict[str, Any]], context: str) -> str:
         response = create_response_with_retries(
             self.client,
             model=self.model,
             instructions=USER_SYSTEM_PROMPT,
             input=[*llm_role_mapped_messages(messages), {"role": "user", "content": context}],
             temperature=self.temperature,
-            max_output_tokens=self.max_output_tokens,
+            max_output_tokens=USER_GENERATION_TOKEN_LIMIT,
         )
-        self.provided_areas.update(area for area in visible_areas if area != "service")
-        return (getattr(response, "output_text", "") or "").strip()
+        return getattr(response, "output_text", "") or ""
+
+    def _generate_chat_completion(self, messages: list[dict[str, Any]], context: str) -> str:
+        response = create_chat_completion_with_retries(
+            self.client,
+            model=self.model,
+            messages=[
+                {"role": "system", "content": USER_SYSTEM_PROMPT},
+                *llm_role_mapped_messages(messages),
+                {"role": "user", "content": context},
+            ],
+            temperature=self.temperature,
+            max_tokens=USER_GENERATION_TOKEN_LIMIT,
+        )
+        choice = response.choices[0] if response.choices else None
+        message = choice.message if choice is not None else None
+        return getattr(message, "content", None) or ""
 
     def _current_slot_group(self, requested: list[str]) -> list[str]:
         requested_set = set(requested)
@@ -164,34 +197,78 @@ class LLMSimulatedUser:
 def hidden_user_facts(spec: dict[str, Any], areas: list[str]) -> dict[str, Any]:
     facts: dict[str, Any] = {}
     selected = set(areas)
+    needs = normalized_needs(spec)
     if "service" in selected:
-        facts["service_need"] = spec.get("service_category")
+        facts["service_needs"] = [
+            {
+                "need_id": need.get("need_id"),
+                "service_categories": need.get("service_categories") or [],
+            }
+            for need in needs
+        ]
+        facts["case_type"] = spec.get("case_type") or ("composite" if len(needs) > 1 else "single")
+        facts["instruction"] = "Mention the user's real-world need naturally; do not mention category labels unless that is the natural wording."
+    if len(needs) > 1 and selected.intersection({"schedule", "location", "intake", "documents", "eligibility"}):
+        facts["note"] = "There are two separate needs. When the requested information differs by need, answer for both needs."
     if "schedule" in selected:
-        facts["schedule"] = spec.get("schedule") or {}
+        facts["schedule"] = facts_for_needs(needs, "schedule")
     if "location" in selected:
-        facts["location"] = spec.get("location") or {}
+        facts["location"] = facts_for_needs(needs, "location")
     if "intake" in selected:
-        facts["intake_methods"] = spec.get("intake_methods") or []
+        facts["intake_methods"] = facts_for_needs(needs, "intake_methods")
     if "documents" in selected:
-        facts["available_documents"] = spec.get("available_documents") or []
+        facts["available_documents"] = facts_for_needs(needs, "available_documents")
     if "eligibility" in selected:
-        facts["eligibility"] = spec.get("eligibility") or []
+        facts["eligibility"] = facts_for_needs(needs, "eligibility")
     return facts
 
 
 def has_concrete_area_fact(spec: dict[str, Any], area: str) -> bool:
+    needs = normalized_needs(spec)
     if area == "schedule":
-        return bool(spec.get("schedule"))
+        return any(bool(need.get("schedule")) for need in needs)
     if area == "location":
-        location = spec.get("location") or {}
-        return any(location.get(key) for key in ("counties", "cities", "zipcodes"))
+        return any(
+            any((need.get("location") or {}).get(key) for key in ("counties", "cities", "zipcodes"))
+            for need in needs
+        )
     if area == "intake":
-        return bool(spec.get("intake_methods"))
+        return any(bool(need.get("intake_methods")) for need in needs)
     if area == "documents":
-        return bool(spec.get("available_documents"))
+        return any(bool(need.get("available_documents")) for need in needs)
     if area == "eligibility":
-        return bool(spec.get("eligibility"))
+        return any(bool(need.get("eligibility")) for need in needs)
     return False
+
+
+def normalized_needs(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    needs = spec.get("needs")
+    if isinstance(needs, list) and needs:
+        return [need for need in needs if isinstance(need, dict)]
+    return [
+        {
+            "need_id": "need-1",
+            "service_categories": [spec.get("service_category")] if spec.get("service_category") else [],
+            "schedule": spec.get("schedule") or {},
+            "location": spec.get("location") or {},
+            "intake_methods": spec.get("intake_methods") or [],
+            "available_documents": spec.get("available_documents") or [],
+            "eligibility": spec.get("eligibility") or [],
+        }
+    ]
+
+
+def facts_for_needs(needs: list[dict[str, Any]], key: str) -> Any:
+    if len(needs) == 1:
+        return needs[0].get(key) or ([] if key != "schedule" and key != "location" else {})
+    return [
+        {
+            "need_id": need.get("need_id"),
+            "service_categories": need.get("service_categories") or [],
+            key: need.get(key) or ([] if key != "schedule" and key != "location" else {}),
+        }
+        for need in needs
+    ]
 
 
 def self_contradiction_instruction(target: str | None) -> str:
@@ -214,7 +291,7 @@ def self_contradiction_instruction(target: str | None) -> str:
         f"For the style of contradiction, use this pattern as a guide but adapt it to the available facts: {example} "
         "If this turn does not ask about the predetermined contradiction slot, answer normally. "
         "If the agent is asking again to clarify or confirm a previous contradiction, answer normally with the real available fact and do not repeat the contradiction. "
-        "Do not give two valid options or say both/either are acceptable. Do not use uncertainty like not sure or maybe. "
+        "Do not turn acceptable alternatives into a contradiction. Do not use uncertainty like not sure or maybe. "
         "Use but to connect the conflict. The reply is invalid if it contains actually, sorry, I mean, not sure, maybe, or after all."
     )
 

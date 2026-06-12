@@ -15,9 +15,10 @@ DEFAULT_RESOURCE_INDEX = Path("data/benchmark/filtered_resources_tagged.csv")
 DEFAULT_FILTERED_RESOURCE_CSV = Path("data/benchmark/filtered_resources_tagged.csv")
 
 TOOL_DESCRIPTION = (
-    "Search filtered Indiana 211 benchmark resources. Every non-empty field is a "
-    "hard AND filter; values within one field are OR alternatives. Use only fields "
-    "that are present in this schema and that the user explicitly needs satisfied."
+    "Search filtered Indiana 211 benchmark resources. Service, schedule, location, "
+    "intake, documents, and eligibility are hard AND filters. Values inside a field "
+    "are acceptable OR alternatives. Location is also OR across zipcodes, cities, "
+    "and counties, so include every location the user says they can accept."
 )
 
 NO_DOCUMENT_VALUES = {"empty", "none", "varies"}
@@ -53,9 +54,10 @@ def search_resources_tool_schema(index: ResourceIndex) -> dict:
         "schedule": {
             "type": "object",
             "description": (
-                "Optional schedule requirement. Use day with start_time/end_time "
-                "when the user needs a specific availability window, or "
-                "requires_24_hours=true for 24-hour availability."
+                "Optional schedule requirement. Use day alone when the user only "
+                "names a day, day with time when they say they are free at a "
+                "specific time, day with start_time/end_time for an availability "
+                "window, or requires_24_hours=true for 24-hour availability."
             ),
             "properties": {
                 "day": {
@@ -70,6 +72,10 @@ def search_resources_tool_schema(index: ResourceIndex) -> dict:
                 "end_time": {
                     "type": "string",
                     "description": "End of needed window in 24-hour HH:MM format, such as 17:30.",
+                },
+                "time": {
+                    "type": "string",
+                    "description": "Specific time the user can go in 24-hour HH:MM format, such as 14:00.",
                 },
                 "requires_24_hours": {
                     "type": "boolean",
@@ -106,10 +112,10 @@ def search_resources_tool_schema(index: ResourceIndex) -> dict:
 
 def execute_search_resources(index: ResourceIndex, args: dict, limit: int | None = None) -> dict:
     request = request_from_tool_args(args, limit=limit)
-    return search_resources_tool_result(search_resources(index, request))
+    return search_resources_tool_result(search_resources(index, request, limit=limit))
 
 
-def search_resources(index: ResourceIndex, request: SearchRequest) -> list[SearchResult]:
+def search_resources(index: ResourceIndex, request: SearchRequest, limit: int | None = None) -> list[SearchResult]:
     results = []
     for resource in index.resources:
         match = _match_resource(resource, request)
@@ -131,7 +137,7 @@ def search_resources(index: ResourceIndex, request: SearchRequest) -> list[Searc
             result.resource.resource_id,
         )
     )
-    return results[:DEFAULT_RESULT_LIMIT]
+    return results[:_bounded_limit(limit, DEFAULT_RESULT_LIMIT)]
 
 
 def request_from_tool_args(args: dict, limit: int | None = None) -> SearchRequest:
@@ -189,24 +195,20 @@ def _match_resource(resource: Resource, request: SearchRequest) -> tuple[list[st
             return None
         matched.append("schedule")
         score += 2.0
-    if request.counties:
-        if _exact_any(request.counties, resource.counties):
-            matched.append("counties")
+    if request.counties or request.cities or request.zipcodes:
+        location_matches = []
+        if request.counties and _exact_any(request.counties, resource.counties):
+            location_matches.append("counties")
             score += 2.0
-        else:
-            return None
-    if request.cities:
-        if _exact_any(request.cities, (resource.city,)):
-            matched.append("cities")
+        if request.cities and _exact_any(request.cities, (resource.city,)):
+            location_matches.append("cities")
             score += 1.0
-        else:
-            return None
-    if request.zipcodes:
-        if _exact_any(request.zipcodes, (resource.zipcode,)):
-            matched.append("zipcodes")
+        if request.zipcodes and _exact_any(request.zipcodes, (resource.zipcode,)):
+            location_matches.append("zipcodes")
             score += 1.0
-        else:
+        if not location_matches:
             return None
+        matched.extend(location_matches)
     if request.intake_methods:
         if _exact_any(request.intake_methods, resource.intake_methods):
             matched.append("intake_methods")
@@ -249,6 +251,9 @@ def _window_satisfies_schedule(window, schedule: dict) -> bool:
         return True
     start = schedule.get("start_minute")
     end = schedule.get("end_minute")
+    time = schedule.get("time_minute")
+    if time is not None:
+        return window.start_minute <= time <= window.end_minute
     if start is None or end is None:
         return True
     return window.start_minute <= start and window.end_minute >= end
@@ -315,12 +320,19 @@ def _schedule_object(value: object) -> dict:
         return {}
     start = _parse_hhmm(value.get("start_time"))
     end = _parse_hhmm(value.get("end_time"))
+    time = _parse_hhmm(value.get("time"))
     result = {"day": day}
-    if start is not None and end is not None and start < end:
+    if start is not None and end is not None and start == end:
+        result["time"] = str(value.get("start_time"))
+        result["time_minute"] = start
+    elif start is not None and end is not None and start < end:
         result["start_time"] = str(value.get("start_time"))
         result["end_time"] = str(value.get("end_time"))
         result["start_minute"] = start
         result["end_minute"] = end
+    elif time is not None:
+        result["time"] = str(value.get("time"))
+        result["time_minute"] = time
     return result
 
 
