@@ -9,7 +9,9 @@ from eval.tool_call_parsers import ParsedToolCall, parse_qwen_xml_tool_calls, pa
 from eval.tool_call_prompts import AGENT_SYSTEM_PROMPT
 
 
-AGENT_GENERATION_TOKEN_LIMIT = 8192
+DEFAULT_AGENT_GENERATION_TOKEN_LIMIT = 2048
+DEFAULT_AGENT_ENABLE_THINKING = False
+DEFAULT_AGENT_THINKING_BUDGET_TOKENS: int | None = None
 
 
 @dataclass
@@ -36,13 +38,16 @@ class LocalHFBackend(AgentBackend):
         adapter: Path | None = None,
         temperature: float = 0.0,
         load_in_4bit: bool = True,
+        max_new_tokens: int = DEFAULT_AGENT_GENERATION_TOKEN_LIMIT,
+        enable_thinking: bool = DEFAULT_AGENT_ENABLE_THINKING,
     ):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
         self.torch = torch
-        self.max_new_tokens = AGENT_GENERATION_TOKEN_LIMIT
+        self.max_new_tokens = max_new_tokens
         self.temperature = temperature
+        self.enable_thinking = enable_thinking
         tokenizer_path = str(adapter or model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
         if self.tokenizer.pad_token is None:
@@ -96,7 +101,7 @@ class LocalHFBackend(AgentBackend):
         if getattr(self.tokenizer, "chat_template", None):
             kwargs = {"tokenize": False, "add_generation_prompt": True, "tools": tools}
             try:
-                return self.tokenizer.apply_chat_template(messages, **kwargs, enable_thinking=False)
+                return self.tokenizer.apply_chat_template(messages, **kwargs, enable_thinking=self.enable_thinking)
             except TypeError:
                 return self.tokenizer.apply_chat_template(messages, **kwargs)
         rendered = "\n".join(f"{msg['role']}: {msg.get('content', '')}" for msg in messages)
@@ -104,9 +109,10 @@ class LocalHFBackend(AgentBackend):
 
 
 class ResponsesAPIBackend(AgentBackend):
-    def __init__(self, provider: str, model: str):
+    def __init__(self, provider: str, model: str, max_output_tokens: int = DEFAULT_AGENT_GENERATION_TOKEN_LIMIT):
         self.client = make_openai_client(provider)
         self.model = model
+        self.max_output_tokens = max_output_tokens
 
     def generate(self, messages: list[dict[str, Any]], tool_schema: dict[str, Any]) -> BackendOutput:
         response = create_response_with_retries(
@@ -115,7 +121,7 @@ class ResponsesAPIBackend(AgentBackend):
             instructions=AGENT_SYSTEM_PROMPT,
             tools=[tool_schema],
             input=messages,
-            max_output_tokens=AGENT_GENERATION_TOKEN_LIMIT,
+            max_output_tokens=self.max_output_tokens,
         )
         token_usage = empty_token_usage()
         add_response_usage(token_usage, response)
@@ -130,11 +136,20 @@ class ResponsesAPIBackend(AgentBackend):
 
 
 class LlamaCppServerBackend(AgentBackend):
-    def __init__(self, model: str, temperature: float = 0.0):
+    def __init__(
+        self,
+        model: str,
+        temperature: float = 0.0,
+        max_tokens: int = DEFAULT_AGENT_GENERATION_TOKEN_LIMIT,
+        enable_thinking: bool = DEFAULT_AGENT_ENABLE_THINKING,
+        thinking_budget_tokens: int | None = DEFAULT_AGENT_THINKING_BUDGET_TOKENS,
+    ):
         self.client = make_openai_client("llama_cpp")
         self.model = model
-        self.max_tokens = AGENT_GENERATION_TOKEN_LIMIT
+        self.max_tokens = max_tokens
         self.temperature = temperature
+        self.enable_thinking = enable_thinking
+        self.thinking_budget_tokens = thinking_budget_tokens
 
     def generate(self, messages: list[dict[str, Any]], tool_schema: dict[str, Any]) -> BackendOutput:
         response = create_chat_completion_with_retries(
@@ -146,6 +161,7 @@ class LlamaCppServerBackend(AgentBackend):
             ],
             max_tokens=self.max_tokens,
             temperature=self.temperature,
+            extra_body=self._extra_body(),
         )
         choice = response.choices[0] if response.choices else None
         message = choice.message if choice is not None else None
@@ -167,6 +183,12 @@ class LlamaCppServerBackend(AgentBackend):
             "Tool schema for search_resources:\n"
             f"{schema_text}"
         )
+
+    def _extra_body(self) -> dict[str, Any]:
+        body: dict[str, Any] = {"chat_template_kwargs": {"enable_thinking": self.enable_thinking}}
+        if self.thinking_budget_tokens is not None:
+            body["thinking_budget_tokens"] = int(self.thinking_budget_tokens)
+        return body
 
 
 def qwen_tool_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -195,7 +217,9 @@ def backend_metadata(args) -> dict[str, Any]:
         if isinstance(value, Path):
             value = str(value)
         result[key] = value
-    result["agent_generation_token_limit"] = AGENT_GENERATION_TOKEN_LIMIT
+    result["agent_generation_token_limit"] = int(getattr(args, "agent_generation_token_limit", DEFAULT_AGENT_GENERATION_TOKEN_LIMIT))
+    result["agent_enable_thinking"] = bool(getattr(args, "agent_enable_thinking", DEFAULT_AGENT_ENABLE_THINKING))
+    result["agent_thinking_budget_tokens"] = getattr(args, "agent_thinking_budget_tokens", DEFAULT_AGENT_THINKING_BUDGET_TOKENS)
     return result
 
 
@@ -204,15 +228,24 @@ def make_backend(args) -> AgentBackend:
         return LlamaCppServerBackend(
             model=args.model,
             temperature=args.agent_temperature,
+            max_tokens=args.agent_generation_token_limit,
+            enable_thinking=args.agent_enable_thinking,
+            thinking_budget_tokens=args.agent_thinking_budget_tokens,
         )
     if args.backend == "responses":
-        return ResponsesAPIBackend(args.provider, args.model)
+        return ResponsesAPIBackend(
+            args.provider,
+            args.model,
+            max_output_tokens=args.agent_generation_token_limit,
+        )
     if args.backend == "local":
         return LocalHFBackend(
             model_name=args.model,
             adapter=args.adapter,
             temperature=args.agent_temperature,
             load_in_4bit=args.load_in_4bit,
+            max_new_tokens=args.agent_generation_token_limit,
+            enable_thinking=args.agent_enable_thinking,
         )
     raise ValueError(f"Unsupported backend: {args.backend}")
 

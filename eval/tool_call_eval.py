@@ -13,9 +13,20 @@ from typing import Any
 from tqdm import tqdm
 
 from agent.llm import is_llama_cpp_provider
-from eval.llm_user import LLMSimulatedUser, USER_GENERATION_TOKEN_LIMIT
+from eval.llm_user import (
+    DEFAULT_USER_ENABLE_THINKING,
+    DEFAULT_USER_GENERATION_TOKEN_LIMIT,
+    DEFAULT_USER_THINKING_BUDGET_TOKENS,
+    LLMSimulatedUser,
+)
 from eval.spec_generation import build_user_specs
-from eval.tool_call_backends import backend_metadata, make_backend
+from eval.tool_call_backends import (
+    DEFAULT_AGENT_ENABLE_THINKING,
+    DEFAULT_AGENT_GENERATION_TOKEN_LIMIT,
+    DEFAULT_AGENT_THINKING_BUDGET_TOKENS,
+    backend_metadata,
+    make_backend,
+)
 from eval.tool_call_parsers import clean_tool_call_text
 from eval.tool_call_schema import (
     normalize_tool_args,
@@ -51,9 +62,15 @@ class EvalConfig:
     adapter: Path | None = None
     max_agent_turns: int = 8
     tool_result_limit: int = DEFAULT_RESULT_LIMIT
+    agent_generation_token_limit: int = DEFAULT_AGENT_GENERATION_TOKEN_LIMIT
+    agent_enable_thinking: bool = DEFAULT_AGENT_ENABLE_THINKING
+    agent_thinking_budget_tokens: int | None = DEFAULT_AGENT_THINKING_BUDGET_TOKENS
     agent_temperature: float = 0.0
     user_provider: str = "llama_cpp"
     user_model: str | None = None
+    user_generation_token_limit: int = DEFAULT_USER_GENERATION_TOKEN_LIMIT
+    user_enable_thinking: bool = DEFAULT_USER_ENABLE_THINKING
+    user_thinking_budget_tokens: int | None = DEFAULT_USER_THINKING_BUDGET_TOKENS
     user_temperature: float = 0.0
     user_behaviors: list[str] = field(default_factory=lambda: list(DEFAULT_USER_BEHAVIORS))
     user_seed: int = 7
@@ -128,6 +145,9 @@ def evaluate_conversation(
         model=config.user_model,
         seed=config.user_seed,
         temperature=config.user_temperature,
+        max_output_tokens=config.user_generation_token_limit,
+        enable_thinking=config.user_enable_thinking,
+        thinking_budget_tokens=config.user_thinking_budget_tokens,
     )
     messages.append({"role": "user", "content": user.opening()})
     raw_agent_outputs = []
@@ -160,7 +180,8 @@ def evaluate_conversation(
                         "content": (
                             f"Tool result for search_resources call {call_index}:\n"
                             f"{json.dumps(result, ensure_ascii=False)}\n"
-                            "Now choose the best returned resource_id or resource_ids for the original user."
+                            "Now choose the best returned resource_id or resource_ids for the original user. "
+                            "Do not call search_resources again unless these results are empty or the user has provided new constraints."
                         ),
                     }
                 )
@@ -218,7 +239,9 @@ def evaluate_conversation(
             "provider": config.user_provider,
             "model": config.user_model,
             "temperature": config.user_temperature,
-            "generation_token_limit": USER_GENERATION_TOKEN_LIMIT,
+            "generation_token_limit": config.user_generation_token_limit,
+            "enable_thinking": config.user_enable_thinking,
+            "thinking_budget_tokens": config.user_thinking_budget_tokens,
         },
         "token_usage": token_usage,
     }
@@ -490,7 +513,11 @@ def resolve_output_dir(config: EvalConfig) -> Path:
     adapter = getattr(config, "adapter", None)
     adapter_name = f"adapter-{slug(Path(adapter).parent.name if Path(adapter).name == 'adapter' else Path(adapter).name)}" if adapter else "base"
     behavior_name = f"behaviors{len(selected_user_behaviors(config))}"
-    run_name = "__".join([spec_name, slug(config.backend), model_name, adapter_name, behavior_name, timestamp])
+    thinking_name = "think-off"
+    if config.agent_enable_thinking:
+        budget = config.agent_thinking_budget_tokens
+        thinking_name = f"think-{budget}" if budget is not None else "think-unlimited"
+    run_name = "__".join([spec_name, slug(config.backend), model_name, adapter_name, behavior_name, thinking_name, timestamp])
     return Path("experiments/tool_call_eval") / run_name
 
 
@@ -517,7 +544,7 @@ def serializable_run_config(config: EvalConfig) -> dict[str, Any]:
         elif isinstance(value, tuple):
             values[key] = list(value)
     values["agent_generation_token_limit"] = backend_metadata(config)["agent_generation_token_limit"]
-    values["user_generation_token_limit"] = USER_GENERATION_TOKEN_LIMIT
+    values["user_generation_token_limit"] = config.user_generation_token_limit
     return {"command": sys.argv, "config": values}
 
 

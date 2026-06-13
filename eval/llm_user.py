@@ -24,17 +24,17 @@ Keep the response as a natural user message. When giving a time range, make AM/P
 
 BEHAVIOR_INSTRUCTIONS = {
     "normal": """Behavior:
-- Opening: directly state the service need only.
+- Opening: directly state the service need only. If there are multiple service needs, mention all of them.
 - Follow-ups: answer the information areas the agent asked about completely and directly.
 - Do not add unrelated background or extra valid search facts.""",
     "rambling": """Behavior:
-- Opening: state the service need, but include extra background noise or an unrelated worry/question.
+- Opening: state the service need. If there are multiple service needs, mention all of them. Include extra background noise or an unrelated worry/question.
 - Follow-ups: answer the information areas the agent asked about, and add noisy background, unnecessary distractor facts, or off-topic questions.
 - Noisy background must not contain any city, county, ZIP code, day, time, intake method, document, eligibility trait, or service need unless it is present in the available facts for this reply.
 - Keep noisy background mundane and realistic, limited to being distracted, folding laundry, paperwork on the table, a phone notification, or waiting on a routine callback. Do not mention children, family needs, bills, housing, food, utilities, transportation help, appliance problems, safety concerns, medical issues, legal issues, money needs, jokes, surreal comments, or animal-related tangents.
 - Do not provide valid search facts the agent did not ask for.""",
     "self_contradictory": """Behavior:
-- Opening: directly state the service need only.
+- Opening: directly state the service need only. If there are multiple service needs, mention all of them.
 - Follow-ups: answer the information areas the agent asked about.
 - One information area is selected as your contradiction slot. Only contradict yourself when answering that selected slot.
 - A self-contradiction means you assert a fact or requirement and also deny that same fact or requirement in the same reply.
@@ -42,7 +42,7 @@ BEHAVIOR_INSTRUCTIONS = {
 - If the agent asks again to clarify or confirm the contradiction, answer normally with the real fact.
 - Do not present the contradiction as a correction. Do not use words such as actually, sorry, or I mean.""",
     "impatience": """Behavior:
-- Opening: directly state the service need only.
+- Opening: directly state the service need only. If there are multiple service needs, mention all of them.
 - Follow-ups: answer the information areas the agent asked about, but sound impatient, rushed, or frustrated about the number of questions.
 - You may complain that there are too many questions, say you are in a hurry, or ask the agent to move faster.
 - Do not intentionally omit asked information that is available.
@@ -50,8 +50,12 @@ BEHAVIOR_INSTRUCTIONS = {
 - Do not provide valid search facts the agent did not ask for.""",
     "unsupported_request": """Behavior:
 - Opening: express the real service need through a concrete request the agent cannot fulfill directly, such as asking the agent for money, asking the agent to order/pay for something, asking the agent to make a purchase, asking the agent to directly provide an item/service, or asking the agent to personally arrange the outcome.
+- If there are multiple service needs, mention all of them by the end of the opening message.
 - The impossible request should be closely related to the real service need and may be distracting. For example, if the hidden need is food assistance, the user might say they are hungry and ask for $100, ask the agent to order food from a restaurant, or ask the agent to buy groceries.
+- Do not transform the real service need into a different service category. For example, if the real need is education or youth programs, ask the agent to enroll, arrange, or pay for that program, but do not describe the need as general financial assistance.
+- Do not invent a location, day, time, intake method, document, eligibility trait, or extra service need inside the impossible request unless that fact is present in the facts available for this reply.
 - Follow-ups: answer the information areas the agent asked about, and sometimes repeat or rephrase the impossible request.
+- Follow-ups must keep the real service type clear; do not replace it with the payment, purchase, or arrangement request.
 - The impossible request is not a valid search fact and should not replace the hidden facts.
 - Do not provide valid search facts the agent did not ask for.""",
 }
@@ -62,8 +66,37 @@ SLOT_GROUPS = (
     ("documents", "eligibility"),
 )
 
+SERVICE_NEED_PHRASES = {
+    "Community and Recreation": "community activities or recreation programs",
+    "Disability and Rehabilitation": "disability support or rehabilitation services",
+    "Disaster and Environmental Services": "disaster recovery or environmental help",
+    "Education and Youth Programs": "education or youth programs",
+    "Employment and Job Training": "job training or employment help",
+    "Family and Caregiver Services": "family or caregiver support",
+    "Financial Assistance and Benefits": "financial assistance or benefits help",
+    "Food Assistance": "food assistance",
+    "Food and Meals": "food or meal assistance",
+    "Health Care": "health care services",
+    "Housing and Shelter": "housing or shelter help",
+    "Legal and Consumer": "legal or consumer help",
+    "Legal and Court Help": "legal or court help",
+    "Material Goods": "material goods or household items",
+    "Medical Support Services": "medical support services",
+    "Mental Health Care": "mental health care",
+    "Mental Health and Substance Use": "mental health or substance use support",
+    "Pet and Animal Services": "pet or animal services",
+    "Pregnancy and Reproductive Health": "pregnancy or reproductive health services",
+    "Public Safety": "public safety help",
+    "Substance Use Services": "substance use support",
+    "Tax Help": "tax help",
+    "Transportation": "transportation help",
+    "Utility Assistance": "utility assistance",
+}
 
-USER_GENERATION_TOKEN_LIMIT = 8192
+
+DEFAULT_USER_GENERATION_TOKEN_LIMIT = 512
+DEFAULT_USER_ENABLE_THINKING = False
+DEFAULT_USER_THINKING_BUDGET_TOKENS: int | None = None
 
 
 @dataclass
@@ -74,6 +107,9 @@ class LLMSimulatedUser:
     model: str
     seed: int | None = None
     temperature: float = 0.0
+    max_output_tokens: int = DEFAULT_USER_GENERATION_TOKEN_LIMIT
+    enable_thinking: bool = DEFAULT_USER_ENABLE_THINKING
+    thinking_budget_tokens: int | None = DEFAULT_USER_THINKING_BUDGET_TOKENS
     turn: int = 0
     client: Any = None
     contradiction_area: str | None = None
@@ -110,6 +146,7 @@ class LLMSimulatedUser:
                 turn_instruction,
                 "Facts available for this reply:\n" + json.dumps(hidden_user_facts(self.spec, visible_areas), ensure_ascii=False, indent=2),
                 "Do not state, hint at, or invent valid search facts that are not included in the facts available for this reply.",
+                "On follow-up turns, do not restate or change the service need unless service_needs is included in the facts available for this reply.",
                 "Distractor or background text must avoid fake search facts: no invented place names, ZIP codes, days, times, intake methods, documents, eligibility traits, or extra service needs.",
                 "Do not mention information areas that are not available for this reply, even to say no preference, none, unknown, or no information.",
                 "If an available requested area is an empty list or empty object, answer naturally that you have no specific information, no requirement, or no preference for that area.",
@@ -130,7 +167,7 @@ class LLMSimulatedUser:
             instructions=USER_SYSTEM_PROMPT,
             input=[*llm_role_mapped_messages(messages), {"role": "user", "content": context}],
             temperature=self.temperature,
-            max_output_tokens=USER_GENERATION_TOKEN_LIMIT,
+            max_output_tokens=self.max_output_tokens,
         )
         return getattr(response, "output_text", "") or ""
 
@@ -144,18 +181,36 @@ class LLMSimulatedUser:
                 {"role": "user", "content": context},
             ],
             temperature=self.temperature,
-            max_tokens=USER_GENERATION_TOKEN_LIMIT,
+            max_tokens=self.max_output_tokens,
+            extra_body=self._extra_body(),
         )
         choice = response.choices[0] if response.choices else None
         message = choice.message if choice is not None else None
         return getattr(message, "content", None) or ""
 
+    def _extra_body(self) -> dict[str, Any]:
+        body: dict[str, Any] = {"chat_template_kwargs": {"enable_thinking": self.enable_thinking}}
+        if self.thinking_budget_tokens is not None:
+            body["thinking_budget_tokens"] = int(self.thinking_budget_tokens)
+        return body
+
     def _current_slot_group(self, requested: list[str]) -> list[str]:
         requested_set = set(requested)
+        matched_groups = [
+            group
+            for group in SLOT_GROUPS
+            if not all(area in self.provided_areas for area in group)
+            and requested_set.intersection(group)
+        ]
+        if len(matched_groups) > 1:
+            areas = []
+            for group in matched_groups:
+                areas.extend(area for area in group if area not in self.provided_areas)
+            return _dedupe(areas)
         for group in SLOT_GROUPS:
             if all(area in self.provided_areas for area in group):
                 continue
-            if requested_set.intersection(group) or requested_set.difference({"service"}):
+            if requested_set.intersection(group):
                 return list(group)
         return requested
 
@@ -202,12 +257,16 @@ def hidden_user_facts(spec: dict[str, Any], areas: list[str]) -> dict[str, Any]:
         facts["service_needs"] = [
             {
                 "need_id": need.get("need_id"),
+                "plain_language_need": plain_language_need(need),
                 "service_categories": need.get("service_categories") or [],
             }
             for need in needs
         ]
         facts["case_type"] = spec.get("case_type") or ("composite" if len(needs) > 1 else "single")
-        facts["instruction"] = "Mention the user's real-world need naturally; do not mention category labels unless that is the natural wording."
+        facts["instruction"] = (
+            "Mention every listed service need in natural user language using plain_language_need. "
+            "Do not mention provider names, resource IDs, need IDs, or category labels unless the category label is the natural wording."
+        )
     if len(needs) > 1 and selected.intersection({"schedule", "location", "intake", "documents", "eligibility"}):
         facts["note"] = "There are two separate needs. When the requested information differs by need, answer for both needs."
     if "schedule" in selected:
@@ -239,6 +298,12 @@ def has_concrete_area_fact(spec: dict[str, Any], area: str) -> bool:
     if area == "eligibility":
         return any(bool(need.get("eligibility")) for need in needs)
     return False
+
+
+def plain_language_need(need: dict[str, Any]) -> str:
+    categories = need.get("service_categories") or []
+    phrases = [SERVICE_NEED_PHRASES.get(category, str(category).replace(" and ", " or ").lower()) for category in categories]
+    return " and ".join(phrase for phrase in phrases if phrase)
 
 
 def normalized_needs(spec: dict[str, Any]) -> list[dict[str, Any]]:
@@ -322,7 +387,7 @@ def requested_areas(text: str) -> list[str]:
         areas.append("intake")
     if _has_any(clean, ("document", "paperwork", "bring", "photo id", "id ", "proof", "license", "birth certificate", "social security", "utility bill")):
         areas.append("documents")
-    if _has_any(clean, ("eligible", "eligibility", "qualify", "income", "veteran", "senior", "youth", "pregnant", "disabled", "disability", "resident", "homeless", "medicaid", "uninsured")):
+    if _has_any(clean, ("eligible", "eligibility", "qualify", "income", "veteran", "senior", "youth", "child", "children", "family", "age", "pregnant", "disabled", "disability", "resident", "homeless", "medicaid", "uninsured")):
         areas.append("eligibility")
     if _has_any(clean, ("what kind of help", "what do you need", "looking for")) and not areas:
         areas.append("service")

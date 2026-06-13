@@ -16,29 +16,6 @@ OPTIONAL_FIELD_PROBABILITY = {
     "eligibility": 0.45,
 }
 
-EXTRA_DOCUMENTS = (
-    "photo_id",
-    "proof_of_address",
-    "proof_of_income",
-    "utility_bill",
-    "social_security",
-    "insurance_card",
-    "lease",
-    "birth_certificate",
-)
-EXTRA_ELIGIBILITY = (
-    "low_income",
-    "resident",
-    "homeless",
-    "veteran",
-    "senior",
-    "youth",
-    "family",
-    "pregnant",
-    "disability",
-    "uninsured",
-    "medicaid",
-)
 IGNORED_REQUIREMENTS = {"empty", "none", "varies", "unknown"}
 CASE_TYPES = ("single", "composite")
 CONSTRAINT_PROFILES = ("all_hard", "acceptable")
@@ -259,14 +236,12 @@ def sample_intake(resource: Resource, rng: random.Random, constraint_profile: st
 
 def sample_available_documents(resource: Resource, rng: random.Random) -> list[str]:
     required = [doc for doc in resource.document_requirements if doc not in IGNORED_REQUIREMENTS]
-    extras = rng.sample(EXTRA_DOCUMENTS, k=rng.randint(0, 2))
-    return dedupe([*required, *extras])
+    return dedupe(required)
 
 
 def sample_eligibility(resource: Resource, rng: random.Random) -> list[str]:
     required = [tag for tag in resource.eligibility_tags if tag not in IGNORED_REQUIREMENTS]
-    extras = rng.sample(EXTRA_ELIGIBILITY, k=rng.randint(0, 2))
-    return dedupe([*required, *extras])
+    return dedupe(required)
 
 
 def dedupe(values: list[str]) -> list[str]:

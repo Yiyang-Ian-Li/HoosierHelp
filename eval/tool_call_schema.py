@@ -116,7 +116,7 @@ def tool_arg_scores(predicted: dict[str, Any] | None, expected: dict[str, Any]) 
         }
     predicted = normalize_tool_args(predicted)
     service = set(predicted["service_categories"]) == set(expected["service_categories"])
-    location = all(set(predicted[key]) == set(expected[key]) for key in ("counties", "cities", "zipcodes"))
+    location = location_matches(predicted, expected)
     schedule = predicted["schedule"] == expected["schedule"]
     intake = set(predicted["intake_methods"]) == set(expected["intake_methods"])
     documents = set(predicted["available_documents"]) == set(expected["available_documents"])
@@ -130,7 +130,28 @@ def tool_arg_scores(predicted: dict[str, Any] | None, expected: dict[str, Any]) 
         "documents_match": documents,
         "eligibility_match": eligibility,
         "all_match": service and location and schedule and intake and documents and eligibility,
+}
+
+
+def location_matches(predicted: dict[str, Any], expected: dict[str, Any]) -> bool:
+    expected_fields = {
+        key: set(expected[key])
+        for key in ("counties", "cities", "zipcodes")
+        if expected[key]
     }
+    predicted_fields = {
+        key: set(predicted[key])
+        for key in ("counties", "cities", "zipcodes")
+        if predicted[key]
+    }
+    if not expected_fields:
+        return not predicted_fields
+    if len(expected_fields) == 1:
+        key, expected_values = next(iter(expected_fields.items()))
+        return predicted_fields == {key: expected_values}
+    if any(values - expected_fields.get(key, set()) for key, values in predicted_fields.items()):
+        return False
+    return any(predicted_fields.get(key) == expected_values for key, expected_values in expected_fields.items())
 
 
 def field_match_count(score: dict[str, Any]) -> int:

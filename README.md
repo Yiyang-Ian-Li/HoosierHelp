@@ -103,8 +103,14 @@ Override `LLAMA_CPP_BASE_URL` if the server is not listening at
 
 By default, both the agent and user simulator use the same `llama.cpp` server.
 When `user_provider="llama_cpp"` is used without `user_model`, the evaluator
-reuses the agent `model`. Generation token limits are fixed in code and
-recorded in each run's `args.json`.
+reuses the agent `model`. Generation token limits are configured in
+`LLM_CONFIG` and recorded in each run's `args.json`.
+
+For `llama.cpp` thinking models, `agent_enable_thinking` and
+`agent_thinking_budget_tokens` can be set per run. On an 8k-context local
+server, keep the user simulator thinking disabled and use a small agent budget
+such as `256` when comparing thinking mode; larger budgets can push multi-turn
+conversations over the context limit.
 
 OpenRouter Responses API:
 

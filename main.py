@@ -15,11 +15,17 @@ LLM_CONFIG: dict[str, Any] = {
     "provider": "openai",
     "model": "qwen3.6-35b-a3b",
     "adapter": None,
+    "agent_generation_token_limit": 2048,
+    "agent_enable_thinking": False,
+    "agent_thinking_budget_tokens": None,
     "agent_temperature": 0.0,
     # User defaults to the same local model. Leave user_model=None to resolve
     # from provider defaults.
     "user_provider": "llama_cpp",
     "user_model": None,
+    "user_generation_token_limit": 512,
+    "user_enable_thinking": False,
+    "user_thinking_budget_tokens": None,
     "user_temperature": 0.0,
 }
 
