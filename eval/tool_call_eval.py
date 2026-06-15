@@ -156,20 +156,29 @@ def evaluate_conversation(
     executed_tool_results = []
     final_text = ""
     token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    runtime_errors: list[dict[str, str]] = []
+    first_turn_tool_call = False
 
-    for _ in range(config.max_agent_turns):
-        output = backend.generate(messages, tool_schema)
+    for turn_index in range(config.max_agent_turns):
+        try:
+            output = backend.generate(messages, tool_schema)
+        except RuntimeError as exc:
+            runtime_errors.append({"stage": "agent_generate", "error": str(exc)})
+            break
         raw_agent_outputs.append(output.text)
         add_token_usage(token_usage, output.token_usage or {})
+        if turn_index == 0 and output.tool_calls:
+            first_turn_tool_call = True
         if output.tool_calls:
-            messages.append({"role": "assistant", "content": output.text})
-            for call_index, tool_call in enumerate(output.tool_calls, start=1):
+            messages.append({"role": "assistant", "content": assistant_tool_call_message(output.tool_calls)})
+            for tool_call in output.tool_calls:
                 predicted_tool_calls.append(tool_call.arguments)
                 parse_modes.append(tool_call.parse_mode)
                 result = execute_search_resources(resource_index, tool_call.arguments, limit=config.tool_result_limit)
+                call_index = len(predicted_tool_calls)
                 executed_tool_results.append(
                     {
-                        "call_index": len(predicted_tool_calls),
+                        "call_index": call_index,
                         "arguments": normalize_tool_args(tool_call.arguments),
                         "result": result,
                     }
@@ -177,38 +186,58 @@ def evaluate_conversation(
                 messages.append(
                     {
                         "role": "user",
-                        "content": (
-                            f"Tool result for search_resources call {call_index}:\n"
-                            f"{json.dumps(result, ensure_ascii=False)}\n"
-                            "Now choose the best returned resource_id or resource_ids for the original user. "
-                            "Do not call search_resources again unless these results are empty or the user has provided new constraints."
-                        ),
+                        "content": tool_result_message(call_index, result),
                     }
                 )
             continue
         if predicted_tool_calls:
             final_text = clean_tool_call_text(output.text)
             messages.append({"role": "assistant", "content": final_text})
+            if not final_text:
+                break
+            if last_tool_result_empty(executed_tool_results):
+                try:
+                    user_reply = user.respond(messages, final_text)
+                except RuntimeError as exc:
+                    runtime_errors.append({"stage": "user_respond", "error": str(exc)})
+                    break
+                if user_reply:
+                    messages.append({"role": "user", "content": user_reply})
+                    continue
+            break
+        if contains_tool_call_syntax(output.text):
+            messages.append({"role": "assistant", "content": "[invalid tool call omitted from transcript]"})
             break
         assistant_text = clean_tool_call_text(output.text)
         messages.append({"role": "assistant", "content": assistant_text})
-        user_reply = user.respond(messages, assistant_text)
+        if not assistant_text:
+            break
+        try:
+            user_reply = user.respond(messages, assistant_text)
+        except RuntimeError as exc:
+            runtime_errors.append({"stage": "user_respond", "error": str(exc)})
+            break
         if not user_reply:
             break
         messages.append({"role": "user", "content": user_reply})
 
     expected = expected_tool_calls(spec)
     expected_resource_ids = expected_resource_ids_from_spec(spec)
-    acceptable_resource_ids_by_need = acceptable_resource_ids_for_expected_calls(resource_index, expected, config.tool_result_limit)
+    valid_resource_ids_by_need = valid_resource_ids_for_expected_calls(resource_index, expected, config.tool_result_limit)
     predicted_resource_ids = normalize_selected_resource_ids(
         parse_selected_resource_ids(final_text),
         executed_tool_results,
     )
-    tool_score = score_tool_calls(predicted_tool_calls, expected)
-    resource_score = score_resource_selection_by_need(predicted_resource_ids, acceptable_resource_ids_by_need)
+    preference_profile = spec.get("preference_profile") or "strict"
+    scored_tool_calls = tool_calls_for_scoring(predicted_tool_calls, executed_tool_results, preference_profile)
+    tool_score = score_tool_calls(scored_tool_calls, expected)
+    resource_score = score_resource_selection_by_need(predicted_resource_ids, valid_resource_ids_by_need)
+    premature_tool_call = first_turn_tool_call and expected_has_nonservice_constraints(expected)
     score = {
         **tool_score,
         **resource_score,
+        "first_turn_tool_call": first_turn_tool_call,
+        "premature_tool_call": premature_tool_call,
         "end_to_end_match": bool(tool_score["all_match"]) and bool(resource_score["resource_exact_match"]),
     }
     return {
@@ -217,11 +246,12 @@ def evaluate_conversation(
         "user_behavior": user_behavior,
         "backend": backend_metadata(config),
         "case_type": spec.get("case_type") or ("composite" if len(spec.get("needs") or []) > 1 else "single"),
-        "constraint_profile": spec.get("constraint_profile") or "all_hard",
+        "preference_profile": preference_profile,
         "expected_tool_calls": expected,
         "predicted_tool_calls": [normalize_tool_args(call) for call in predicted_tool_calls],
+        "scored_tool_calls": [normalize_tool_args(call) for call in scored_tool_calls],
         "expected_resource_ids": expected_resource_ids,
-        "acceptable_resource_ids_by_need": acceptable_resource_ids_by_need,
+        "valid_resource_ids_by_need": valid_resource_ids_by_need,
         "predicted_resource_ids": predicted_resource_ids,
         "final_text": final_text,
         "executed_tool_results": executed_tool_results,
@@ -230,10 +260,11 @@ def evaluate_conversation(
         "score": score,
         "messages": messages,
         "raw_agent_outputs": raw_agent_outputs,
+        "runtime_errors": runtime_errors,
         "user_simulator": "llm",
         "user_simulator_state": {
             "contradiction_area": user.contradiction_area,
-            "contradiction_used": user.contradiction_used,
+            "fallback_revealed": user.fallback_revealed,
         },
         "user_backend": {
             "provider": config.user_provider,
@@ -245,6 +276,66 @@ def evaluate_conversation(
         },
         "token_usage": token_usage,
     }
+
+
+def tool_result_message(call_index: int, result: dict[str, Any]) -> str:
+    resources = result.get("resources") or []
+    if not resources:
+        return (
+            f"Tool result for search_resources call {call_index}:\n"
+            f"{json.dumps(result, ensure_ascii=False)}\n"
+            "No resources matched that search."
+        )
+    return (
+        f"Tool result for search_resources call {call_index}:\n"
+        f"{json.dumps(result, ensure_ascii=False)}\n"
+        "Now choose the best returned resource_id or resource_ids for the original user. "
+        "Do not call search_resources again unless the user has provided new constraints."
+    )
+
+
+def assistant_tool_call_message(tool_calls: list[Any]) -> str:
+    blocks = [
+        {
+            "name": "search_resources",
+            "arguments": compact_tool_args_for_context(getattr(tool_call, "arguments", {}) or {}),
+        }
+        for tool_call in tool_calls
+    ]
+    return "\n".join(f"<tool_call> {json.dumps(block, ensure_ascii=False)} </tool_call>" for block in blocks)
+
+
+def contains_tool_call_syntax(text: str) -> bool:
+    return "<tool_call" in (text or "")
+
+
+def compact_tool_args_for_context(args: dict[str, Any], max_items: int = 8) -> dict[str, Any]:
+    compact = normalize_tool_args(args)
+    for key in ("service_categories", "counties", "cities", "zipcodes", "intake_methods", "available_documents", "eligibility"):
+        values = compact.get(key)
+        if isinstance(values, list) and len(values) > max_items:
+            compact[key] = values[:max_items]
+    return compact
+
+
+def last_tool_result_empty(executed_tool_results: list[dict[str, Any]]) -> bool:
+    if not executed_tool_results:
+        return False
+    return not (executed_tool_results[-1].get("result") or {}).get("resources")
+
+
+def tool_calls_for_scoring(
+    predicted_tool_calls: list[dict[str, Any]],
+    executed_tool_results: list[dict[str, Any]],
+    preference_profile: str,
+) -> list[dict[str, Any]]:
+    if preference_profile != "flexible":
+        return predicted_tool_calls
+    return [
+        item.get("arguments") or {}
+        for item in executed_tool_results
+        if (item.get("result") or {}).get("resources")
+    ]
 
 
 def expected_tool_args(spec: dict[str, Any]) -> dict[str, Any]:
@@ -266,6 +357,16 @@ def expected_tool_calls(spec: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(needs, list) and needs:
         return [expected_tool_args_for_need(need) for need in needs if isinstance(need, dict)]
     return [expected_tool_args(spec)]
+
+
+def expected_has_nonservice_constraints(expected_calls: list[dict[str, Any]]) -> bool:
+    for call in expected_calls:
+        normalized = normalize_tool_args(call)
+        if normalized["schedule"]:
+            return True
+        if any(normalized[key] for key in ("counties", "cities", "zipcodes", "intake_methods", "available_documents", "eligibility")):
+            return True
+    return False
 
 
 def expected_tool_args_for_need(need: dict[str, Any]) -> dict[str, Any]:
@@ -291,12 +392,12 @@ def expected_resource_ids_from_spec(spec: dict[str, Any]) -> list[str]:
     return []
 
 
-def acceptable_resource_ids_for_expected_calls(resource_index, expected_calls: list[dict[str, Any]], limit: int) -> list[list[str]]:
-    acceptable = []
+def valid_resource_ids_for_expected_calls(resource_index, expected_calls: list[dict[str, Any]], limit: int) -> list[list[str]]:
+    valid = []
     for call in expected_calls:
         result = execute_search_resources(resource_index, call, limit=limit)
-        acceptable.append([str(item["resource_id"]) for item in result.get("resources", []) if item.get("resource_id")])
-    return acceptable
+        valid.append([str(item["resource_id"]) for item in result.get("resources", []) if item.get("resource_id")])
+    return valid
 
 
 def normalize_selected_resource_ids(predicted_ids: list[str], executed_tool_results: list[dict[str, Any]]) -> list[str]:
@@ -323,6 +424,8 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
     keys = [
         "valid_tool_call",
         "tool_call_count_match",
+        "first_turn_tool_call",
+        "premature_tool_call",
         "service_match",
         "location_match",
         "schedule_match",
@@ -334,50 +437,56 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
         "end_to_end_match",
     ]
     parse_modes = Counter(record["parse_mode"] for record in records)
+    user_behaviors = sorted({record["user_behavior"] for record in records})
+    case_types = sorted({record.get("case_type") for record in records})
+    preference_profiles = sorted({record.get("preference_profile") for record in records})
     return {
         "cases": len(records),
-        "overall": aggregate([record["score"] for record in records], keys),
+        "overall": aggregate_records(records, keys),
         "by_user_behavior": {
-            user_behavior: aggregate([record["score"] for record in records if record["user_behavior"] == user_behavior], keys)
-            for user_behavior in sorted({record["user_behavior"] for record in records})
+            user_behavior: aggregate_records([record for record in records if record["user_behavior"] == user_behavior], keys)
+            for user_behavior in user_behaviors
         },
         "by_case_type": {
-            case_type: aggregate([record["score"] for record in records if record.get("case_type") == case_type], keys)
-            for case_type in sorted({record.get("case_type") for record in records})
+            case_type: aggregate_records([record for record in records if record.get("case_type") == case_type], keys)
+            for case_type in case_types
         },
-        "by_constraint_profile": {
-            profile: aggregate([record["score"] for record in records if record.get("constraint_profile") == profile], keys)
-            for profile in sorted({record.get("constraint_profile") for record in records})
+        "by_preference_profile": {
+            profile: aggregate_records([record for record in records if record.get("preference_profile") == profile], keys)
+            for profile in preference_profiles
         },
-        "by_case_type_constraint_behavior": {
-            f"{case_type}__{profile}__{behavior}": aggregate(
+        "by_case_type_preference_behavior": {
+            f"{case_type}__{profile}__{behavior}": aggregate_records(
                 [
-                    record["score"]
+                    record
                     for record in records
                     if record.get("case_type") == case_type
-                    and record.get("constraint_profile") == profile
+                    and record.get("preference_profile") == profile
                     and record.get("user_behavior") == behavior
                 ],
                 keys,
             )
-            for case_type in sorted({record.get("case_type") for record in records})
-            for profile in sorted({record.get("constraint_profile") for record in records})
-            for behavior in sorted({record.get("user_behavior") for record in records})
+            for case_type in case_types
+            for profile in preference_profiles
+            for behavior in user_behaviors
         },
         "parse_modes": dict(sorted(parse_modes.items())),
         "parse_none_rate": parse_modes.get("none", 0) / len(records) if records else 0.0,
         "score_by_parse_mode": {
-            mode: aggregate([record["score"] for record in records if record["parse_mode"] == mode], keys)
+            mode: aggregate_records([record for record in records if record["parse_mode"] == mode], keys)
             for mode in sorted(parse_modes)
         },
-        "turn_stats": turn_stats(records),
         "token_usage": token_usage_summary(records),
         "failure_counts": failure_counts(records),
         "by_user_behavior_failure_counts": {
             user_behavior: failure_counts([record for record in records if record["user_behavior"] == user_behavior])
-            for user_behavior in sorted({record["user_behavior"] for record in records})
+            for user_behavior in user_behaviors
         },
     }
+
+
+def aggregate_records(records: list[dict[str, Any]], keys: list[str]) -> dict[str, float]:
+    return aggregate([record["score"] for record in records], keys) | turn_stats(records)
 
 
 def aggregate(scores: list[dict[str, bool]], keys: list[str]) -> dict[str, float]:

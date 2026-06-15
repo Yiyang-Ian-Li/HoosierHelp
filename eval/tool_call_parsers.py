@@ -10,7 +10,7 @@ from eval.tool_call_schema import normalize_tool_args
 
 TOOL_NAME = "search_resources"
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-TOOL_CALL_RE = re.compile(r"<tool_call>\s*(?P<payload>\{.*?\})\s*</tool_call>", re.DOTALL)
+TOOL_CALL_RE = re.compile(r"<tool_call>\s*(?P<payload>.*?)\s*</tool_call>", re.DOTALL)
 
 
 @dataclass(frozen=True)

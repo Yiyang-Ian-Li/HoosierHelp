@@ -15,9 +15,17 @@ documents, and eligibility constraints, then used the tool results correctly.
 
 Each case contains hidden user facts, expected `search_resources` calls, and
 ground-truth resources. Cases cover single-need and composite two-need users,
-all-hard constraints, and acceptable-alternative constraints. Acceptable
-alternatives include cases such as a preferred ZIP code with a broader city or
-county also acceptable.
+strict constraints, and flexible-preference constraints. Strict cases make the
+stated constraints hard requirements. Flexible cases give the user a preferred
+location, schedule, or intake option that intentionally has no matching
+resources, then reveal a fallback option the user can accept when the first
+search does not work. Documents and eligibility remain ordinary search facts;
+they are not flexible fallback dimensions.
+
+Composite cases model one user with two service needs. The two needs have
+separate service categories and explicit, independently sampled schedules, while
+user-level facts such as location, intake method, documents, and eligibility are
+shared.
 
 The simulated user reveals facts through one of several behavior modes:
 
@@ -30,7 +38,7 @@ unsupported_request
 ```
 
 The agent is evaluated on whether its tool calls match the expected normalized
-arguments and whether the final answer selects acceptable returned resource
+arguments and whether the final answer selects valid returned resource
 IDs. Field-level scores, executed tool results, final selections, and full
 transcripts are saved for analysis.
 

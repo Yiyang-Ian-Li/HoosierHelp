@@ -57,13 +57,15 @@ def search_resources_tool_schema(index: ResourceIndex) -> dict:
                 "Optional schedule requirement. Use day alone when the user only "
                 "names a day, day with time when they say they are free at a "
                 "specific time, day with start_time/end_time for an availability "
-                "window, or requires_24_hours=true for 24-hour availability."
+                "window, or requires_24_hours=true for 24-hour availability. "
+                "Do not include day, time, start_time, end_time, or requires_24_hours "
+                "when the user has no schedule requirement or can accept any day/time."
             ),
             "properties": {
                 "day": {
                     "type": "string",
                     "enum": list(DAY_VALUES),
-                    "description": "Required day: mon/tue/wed/thu/fri/sat/sun.",
+                    "description": "Use only when the user gives a concrete day: mon/tue/wed/thu/fri/sat/sun.",
                 },
                 "start_time": {
                     "type": "string",
@@ -148,8 +150,8 @@ def request_from_tool_args(args: dict, limit: int | None = None) -> SearchReques
         cities=_string_tuple(args.get("cities")),
         zipcodes=_string_tuple(args.get("zipcodes")),
         intake_methods=_string_tuple(args.get("intake_methods")),
-        available_documents=_string_tuple(args.get("available_documents")),
-        eligibility=_string_tuple(args.get("eligibility")),
+        available_documents=_meaningful_tuple(args.get("available_documents"), {"empty", "none", "varies", "unknown"}),
+        eligibility=_meaningful_tuple(args.get("eligibility"), {"empty", "none", "varies", "unknown"}),
     )
 
 
@@ -308,6 +310,10 @@ def _string_tuple(value: object) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
     return tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
+
+
+def _meaningful_tuple(value: object, ignored: set[str]) -> tuple[str, ...]:
+    return tuple(item for item in _string_tuple(value) if _norm(item) not in ignored)
 
 
 def _schedule_object(value: object) -> dict:

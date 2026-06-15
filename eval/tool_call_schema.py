@@ -33,7 +33,7 @@ def normalize_tool_args(args: dict[str, Any]) -> dict[str, Any]:
         "zipcodes": _string_list(args.get("zipcodes")),
         "intake_methods": _string_list(args.get("intake_methods")),
         "available_documents": _document_list(args.get("available_documents")),
-        "eligibility": _string_list(args.get("eligibility")),
+        "eligibility": _eligibility_list(args.get("eligibility")),
     }
 
 
@@ -186,20 +186,20 @@ def score_resource_selection(predicted_ids: list[str], expected_ids: list[str]) 
     }
 
 
-def score_resource_selection_by_need(predicted_ids: list[str], acceptable_by_need: list[list[str]]) -> dict[str, Any]:
+def score_resource_selection_by_need(predicted_ids: list[str], valid_by_need: list[list[str]]) -> dict[str, Any]:
     predicted = list(dict.fromkeys(predicted_ids or []))
-    acceptable_sets = [set(ids) for ids in acceptable_by_need if ids]
-    all_acceptable = set().union(*acceptable_sets) if acceptable_sets else set()
-    covered = [bool(set(predicted) & acceptable) for acceptable in acceptable_sets]
-    invalid = [resource_id for resource_id in predicted if resource_id not in all_acceptable]
+    valid_sets = [set(ids) for ids in valid_by_need if ids]
+    all_valid = set().union(*valid_sets) if valid_sets else set()
+    covered = [bool(set(predicted) & valid) for valid in valid_sets]
+    invalid = [resource_id for resource_id in predicted if resource_id not in all_valid]
     return {
-        "expected_resource_count": len(acceptable_sets),
+        "expected_resource_count": len(valid_sets),
         "predicted_resource_count": len(predicted),
         "correct_resource_count": sum(covered),
-        "resource_precision": (len([item for item in predicted if item in all_acceptable]) / len(predicted)) if predicted else 0.0,
-        "resource_recall": (sum(covered) / len(acceptable_sets)) if acceptable_sets else 0.0,
-        "resource_exact_match": bool(acceptable_sets) and all(covered) and not invalid,
-        "acceptable_resource_ids_by_need": [sorted(ids) for ids in acceptable_sets],
+        "resource_precision": (len([item for item in predicted if item in all_valid]) / len(predicted)) if predicted else 0.0,
+        "resource_recall": (sum(covered) / len(valid_sets)) if valid_sets else 0.0,
+        "resource_exact_match": bool(valid_sets) and all(covered) and not invalid,
+        "valid_resource_ids_by_need": [sorted(ids) for ids in valid_sets],
         "invalid_resource_ids": invalid,
     }
 
@@ -269,6 +269,17 @@ def _document_list(value: Any) -> list[str]:
     for item in _string_list(value):
         clean = item.lower()
         if clean in {"empty", "none", "varies"}:
+            continue
+        if clean and clean not in normalized:
+            normalized.append(clean)
+    return normalized
+
+
+def _eligibility_list(value: Any) -> list[str]:
+    normalized = []
+    for item in _string_list(value):
+        clean = item.lower()
+        if clean in {"empty", "none", "varies", "unknown"}:
             continue
         if clean and clean not in normalized:
             normalized.append(clean)

@@ -19,10 +19,9 @@ LLM_CONFIG: dict[str, Any] = {
     "agent_enable_thinking": False,
     "agent_thinking_budget_tokens": None,
     "agent_temperature": 0.0,
-    # User defaults to the same local model. Leave user_model=None to resolve
-    # from provider defaults.
-    "user_provider": "llama_cpp",
-    "user_model": None,
+    # Keep the simulated user fixed across agent comparisons.
+    "user_provider": "openrouter",
+    "user_model": "openai/gpt-4.1-mini",
     "user_generation_token_limit": 512,
     "user_enable_thinking": False,
     "user_thinking_budget_tokens": None,
@@ -30,7 +29,7 @@ LLM_CONFIG: dict[str, Any] = {
 }
 
 RUN_CONFIG: dict[str, Any] = {
-    "sample_count": 64,
+    "sample_count": 48,
     "sample_seed": 1,
     "sample_progress_every": 0,
     "resources": Path("data/benchmark/filtered_resources_tagged.csv"),
