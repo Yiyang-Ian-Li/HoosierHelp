@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from eval.tool_call_eval import EvalConfig, run as run_tool_call_eval
+from eval.runner import EvalConfig, run as run_eval
 
 
 # Defaults come from EvalConfig. Keep these dicts to the few values a local run
@@ -48,7 +48,7 @@ def main() -> None:
     config = EvalConfig()
     apply_config(config, LLM_CONFIG)
     apply_config(config, RUN_CONFIG)
-    run_tool_call_eval(config)
+    run_eval(config)
 
 
 def apply_config(eval_config: EvalConfig, values: dict[str, Any]) -> EvalConfig:

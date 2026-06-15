@@ -15,12 +15,13 @@ documents, and eligibility constraints, then used the tool results correctly.
 
 Each case contains hidden user facts, expected `search_resources` calls, and
 ground-truth resources. Cases cover single-need and composite two-need users,
-strict constraints, and flexible-preference constraints. Strict cases make the
-stated constraints hard requirements. Flexible cases give the user a preferred
-location, schedule, or intake option that intentionally has no matching
-resources, then reveal a fallback option the user can accept when the first
-search does not work. Documents and eligibility remain ordinary search facts;
-they are not flexible fallback dimensions.
+direct-match constraints, and fallback-required constraints. `direct_match`
+cases have one set of stated constraints that should identify the target
+resource. `fallback_required` cases first give the user a location, schedule, or
+intake constraint that intentionally has no matching resources, then reveal a
+fallback option the user can accept when the first search does not work.
+Documents and eligibility remain ordinary search facts; they are not fallback
+dimensions.
 
 Composite cases model one user with two service needs. The two needs have
 separate service categories and explicit, independently sampled schedules, while
@@ -46,10 +47,11 @@ transcripts are saved for analysis.
 
 ```text
 eval/                         Online evaluation harness
-  tool_call_eval.py            Evaluation runner library
-  tool_call_backends.py        Local HF and Responses API backends
-  tool_call_parsers.py         Tool-call parsers
-  tool_call_schema.py          Normalization and scoring
+  runner.py                   Evaluation runner library
+  agent_backends.py           Local HF and Responses API backends
+  agent_prompt.py             Agent system prompt
+  tool_parsing.py             Tool-call parsers
+  scoring.py                  Normalization and scoring
   llm_user.py                  LLM simulated user
   spec_generation.py           Reproducible runtime user-spec generation
 
@@ -128,8 +130,8 @@ Set `backend="responses"`, `provider="openrouter"`,
 main.py`.
 
 If `output_dir` is omitted, the evaluator creates a timestamped directory
-under `experiments/tool_call_eval/`. Each run writes `args.json`,
-`records.jsonl`, and `summary.json`.
+under `experiments/`. Each run writes `args.json`, `records.jsonl`, and
+`summary.json`.
 
 For OpenRouter connectivity:
 

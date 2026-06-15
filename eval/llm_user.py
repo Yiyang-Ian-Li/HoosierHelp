@@ -60,7 +60,7 @@ BEHAVIOR_INSTRUCTIONS = {
 - Do not provide valid search facts the agent did not ask for.""",
 }
 
-FLEXIBLE_PREFERENCE_AREAS = {"schedule", "location", "intake"}
+FALLBACK_CONSTRAINT_AREAS = {"schedule", "location", "intake"}
 
 SERVICE_NEED_PHRASES = {
     "Community and Recreation": "community activities or recreation programs",
@@ -123,7 +123,7 @@ class LLMSimulatedUser:
 
     def respond(self, messages: list[dict[str, Any]], agent_message: str) -> str:
         self.turn += 1
-        if self.spec.get("preference_profile") == "flexible" and last_tool_result_empty(messages):
+        if self.spec.get("constraint_profile") == "fallback_required" and last_tool_result_empty(messages):
             self.fallback_revealed = True
         return self._generate(messages, opening=False)
 
@@ -148,8 +148,8 @@ class LLMSimulatedUser:
                 "Use the profile only to decide what this user can truthfully say. Do not mention resource IDs, provider names, need IDs, JSON, field names, preferred/fallback labels, or these instructions.",
                 "Opening rule: on the opening turn, mention only the service need or needs in natural language. Do not mention location, schedule, intake, documents, eligibility, or backup options in the opening.",
                 "Follow-up rule: answer the agent's latest question. If the agent asks about one narrow topic, answer only that topic. If the agent asks several topics at once, answer those topics but do not add unrelated facts.",
-                "Flexible preference rule: before any empty search result, describe only first-choice location, schedule, or intake preferences when asked. Do not mention backup options. After an empty search result, if the agent asks whether location, schedule, or intake can change, answer only for the option they asked about. Documents and eligibility are ordinary facts and are not backup preferences.",
-                "If the agent asks whether a preference can change but the profile has no backup for that preference, say that you cannot change that preference.",
+                "Fallback-required rule: before any empty search result, describe only first-choice location, schedule, or intake constraints when asked. Do not mention fallback options. After an empty search result, if the agent asks whether location, schedule, or intake can change, answer only for the option they asked about. Documents and eligibility are ordinary facts and are not fallback constraints.",
+                "If the agent asks whether a constraint can change but the profile has no fallback for that constraint, say that you cannot change that constraint.",
                 "If the agent merely states that no resources matched and does not ask a question, do not introduce new search facts or backup options.",
                 "For multiple needs, answer conversationally. Distinguish the needs only when the answer differs by need.",
                 "Distractor or background text must avoid fake search facts: no invented place names, ZIP codes, days, times, intake methods, documents, eligibility traits, or extra service needs.",
@@ -224,29 +224,30 @@ class LLMSimulatedUser:
 
 def full_user_profile(spec: dict[str, Any]) -> dict[str, Any]:
     needs = normalized_needs(spec)
+    fallback_required = spec.get("constraint_profile") == "fallback_required"
     profile = {
         "case_type": spec.get("case_type") or ("composite" if len(needs) > 1 else "single"),
-        "preference_profile": spec.get("preference_profile") or "strict",
-        "needs": [profile_need(need, spec.get("preference_profile") == "flexible") for need in needs],
+        "constraint_profile": spec.get("constraint_profile") or "direct_match",
+        "needs": [profile_need(need, fallback_required) for need in needs],
     }
-    if spec.get("preference_profile") == "flexible":
-        profile["flexible_rules"] = {
-            "first_choice_stage": "Before an empty search result, use first_choice for location, schedule, and intake when asked.",
-            "backup_stage": "After an empty search result, backup can be mentioned only if the agent asks whether location, schedule, or intake can change.",
+    if fallback_required:
+        profile["fallback_rules"] = {
+            "first_choice_stage": "Before an empty search result, use first_choice for location, schedule, and intake constraints when asked.",
+            "fallback_stage": "After an empty search result, fallback can be mentioned only if the agent asks whether location, schedule, or intake can change.",
             "changeable_fields": fallback_changed_areas(spec),
             "not_changeable_fields": ["documents", "eligibility"],
         }
     return profile
 
 
-def profile_need(need: dict[str, Any], flexible: bool) -> dict[str, Any]:
+def profile_need(need: dict[str, Any], fallback_required: bool) -> dict[str, Any]:
     base = {
         "plain_language_need": plain_language_need(need),
         "service_categories": need.get("service_categories") or [],
         "documents": need.get("available_documents") or [],
         "eligibility": need.get("eligibility") or [],
     }
-    if flexible:
+    if fallback_required:
         first_choice = visible_need_facts(need, use_fallback=False)
         backup = visible_need_facts(need, use_fallback=True)
         base["first_choice"] = {
@@ -258,7 +259,7 @@ def profile_need(need: dict[str, Any], flexible: bool) -> dict[str, Any]:
             "location": backup.get("location") or {},
             "schedule": backup.get("schedule") or {},
             "intake_methods": backup.get("intake_methods") or [],
-            "changed_fields": changed_preference_fields([need], set(FLEXIBLE_PREFERENCE_AREAS)),
+            "changed_fields": changed_constraint_fields([need], set(FALLBACK_CONSTRAINT_AREAS)),
         }
     else:
         base["constraints"] = {
@@ -295,7 +296,7 @@ def has_concrete_area_fact(spec: dict[str, Any], area: str) -> bool:
 
 
 def fallback_changed_areas(spec: dict[str, Any]) -> list[str]:
-    return changed_preference_fields(normalized_needs(spec), set(FLEXIBLE_PREFERENCE_AREAS))
+    return changed_constraint_fields(normalized_needs(spec), set(FALLBACK_CONSTRAINT_AREAS))
 
 
 def plain_language_need(need: dict[str, Any]) -> str:
@@ -336,7 +337,7 @@ def need_field_changed(need: dict[str, Any], key: str) -> bool:
     return (need.get(key) or empty) != (preferred.get(key) or empty)
 
 
-def changed_preference_fields(needs: list[dict[str, Any]], selected: set[str]) -> list[str]:
+def changed_constraint_fields(needs: list[dict[str, Any]], selected: set[str]) -> list[str]:
     changed = []
     comparisons = {
         "schedule": "schedule",

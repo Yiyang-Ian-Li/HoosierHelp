@@ -5,10 +5,14 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from eval.tool_call_schema import normalize_tool_args
+from eval.scoring import normalize_tool_args
+from tools.tool_protocol import (
+    FINAL_RECOMMENDATION_TOOL_NAME,
+    SEARCH_RESOURCES_TOOL_NAME,
+    normalize_final_recommendation_args,
+)
 
 
-TOOL_NAME = "search_resources"
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 TOOL_CALL_RE = re.compile(r"<tool_call>\s*(?P<payload>.*?)\s*</tool_call>", re.DOTALL)
 
@@ -48,8 +52,9 @@ def parse_responses_tool_calls(response: Any) -> list[ParsedToolCall]:
             continue
         name = _item_attr(item, "name")
         arguments = _json_object(_item_attr(item, "arguments") or "{}")
-        if name == TOOL_NAME and isinstance(arguments, dict):
-            calls.append(ParsedToolCall(TOOL_NAME, normalize_tool_args(arguments), "responses_function_call"))
+        call = parsed_tool_call(name, arguments, "responses_function_call")
+        if call is not None:
+            calls.append(call)
     return calls
 
 
@@ -69,13 +74,17 @@ def strip_reasoning(text: str) -> str:
 def _tool_call_from_object(obj: Any, parse_mode: str) -> ParsedToolCall | None:
     if not isinstance(obj, dict):
         return None
-    if obj.get("name") == TOOL_NAME and isinstance(obj.get("arguments"), dict):
-        return ParsedToolCall(TOOL_NAME, normalize_tool_args(obj["arguments"]), parse_mode)
-    if obj.get("type") == "tool_call" and obj.get("name") == TOOL_NAME and isinstance(obj.get("arguments"), dict):
-        return ParsedToolCall(TOOL_NAME, normalize_tool_args(obj["arguments"]), parse_mode)
+    if isinstance(obj.get("arguments"), dict):
+        call = parsed_tool_call(obj.get("name"), obj.get("arguments"), parse_mode)
+        if call is not None:
+            return call
+    if obj.get("type") == "tool_call" and isinstance(obj.get("arguments"), dict):
+        call = parsed_tool_call(obj.get("name"), obj.get("arguments"), parse_mode)
+        if call is not None:
+            return call
     function = obj.get("function")
-    if isinstance(function, dict) and function.get("name") == TOOL_NAME and isinstance(function.get("arguments"), dict):
-        return ParsedToolCall(TOOL_NAME, normalize_tool_args(function["arguments"]), parse_mode)
+    if isinstance(function, dict) and isinstance(function.get("arguments"), dict):
+        return parsed_tool_call(function.get("name"), function.get("arguments"), parse_mode)
     return None
 
 
@@ -83,8 +92,16 @@ def _openai_function_call_from_object(obj: Any, parse_mode: str) -> ParsedToolCa
     if not isinstance(obj, dict) or obj.get("type") != "function":
         return None
     function = obj.get("function")
-    if isinstance(function, dict) and function.get("name") == TOOL_NAME and isinstance(function.get("arguments"), dict):
-        return ParsedToolCall(TOOL_NAME, normalize_tool_args(function["arguments"]), parse_mode)
+    if isinstance(function, dict) and isinstance(function.get("arguments"), dict):
+        return parsed_tool_call(function.get("name"), function.get("arguments"), parse_mode)
+    return None
+
+
+def parsed_tool_call(name: Any, arguments: Any, parse_mode: str) -> ParsedToolCall | None:
+    if name == SEARCH_RESOURCES_TOOL_NAME and isinstance(arguments, dict):
+        return ParsedToolCall(SEARCH_RESOURCES_TOOL_NAME, normalize_tool_args(arguments), parse_mode)
+    if name == FINAL_RECOMMENDATION_TOOL_NAME and isinstance(arguments, dict):
+        return ParsedToolCall(FINAL_RECOMMENDATION_TOOL_NAME, normalize_final_recommendation_args(arguments), parse_mode)
     return None
 
 

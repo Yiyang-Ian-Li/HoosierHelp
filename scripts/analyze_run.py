@@ -123,7 +123,7 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Summarize a tool-call eval run.")
+    parser = argparse.ArgumentParser(description="Summarize an evaluation run.")
     parser.add_argument("records", type=Path)
     parser.add_argument("--examples", type=int, default=0)
     return parser.parse_args()

@@ -5,8 +5,9 @@ from pathlib import Path
 from typing import Any
 
 from agent.llm import create_chat_completion_with_retries, create_response_with_retries, make_openai_client
-from eval.tool_call_parsers import ParsedToolCall, parse_qwen_xml_tool_calls, parse_responses_tool_calls
-from eval.tool_call_prompts import AGENT_SYSTEM_PROMPT
+from eval.tool_parsing import ParsedToolCall, parse_qwen_xml_tool_calls, parse_responses_tool_calls
+from eval.agent_prompt import AGENT_SYSTEM_PROMPT
+from tools.tool_protocol import qwen_tool_schemas
 
 
 DEFAULT_AGENT_GENERATION_TOKEN_LIMIT = 2048
@@ -27,7 +28,7 @@ class BackendOutput:
 
 
 class AgentBackend:
-    def generate(self, messages: list[dict[str, Any]], tool_schema: dict[str, Any]) -> BackendOutput:
+    def generate(self, messages: list[dict[str, Any]], tool_schemas: list[dict[str, Any]]) -> BackendOutput:
         raise NotImplementedError
 
 
@@ -75,8 +76,8 @@ class LocalHFBackend(AgentBackend):
             self.model = PeftModel.from_pretrained(self.model, adapter)
         self.model.eval()
 
-    def generate(self, messages: list[dict[str, Any]], tool_schema: dict[str, Any]) -> BackendOutput:
-        prompt = self._chat_prompt([{"role": "system", "content": AGENT_SYSTEM_PROMPT}, *messages], tool_schema)
+    def generate(self, messages: list[dict[str, Any]], tool_schemas: list[dict[str, Any]]) -> BackendOutput:
+        prompt = self._chat_prompt([{"role": "system", "content": AGENT_SYSTEM_PROMPT}, *messages], tool_schemas)
         inputs = self.tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(self.model.device)
         eos_token_ids = [self.tokenizer.eos_token_id]
         im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
@@ -96,8 +97,8 @@ class LocalHFBackend(AgentBackend):
         text = self.tokenizer.decode(outputs[0, inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
         return BackendOutput(text=text, tool_calls=parse_qwen_xml_tool_calls(text))
 
-    def _chat_prompt(self, messages: list[dict[str, Any]], tool_schema: dict[str, Any]) -> str:
-        tools = [qwen_tool_schema(tool_schema)]
+    def _chat_prompt(self, messages: list[dict[str, Any]], tool_schemas: list[dict[str, Any]]) -> str:
+        tools = qwen_tool_schemas(tool_schemas)
         if getattr(self.tokenizer, "chat_template", None):
             kwargs = {"tokenize": False, "add_generation_prompt": True, "tools": tools}
             try:
@@ -114,12 +115,12 @@ class ResponsesAPIBackend(AgentBackend):
         self.model = model
         self.max_output_tokens = max_output_tokens
 
-    def generate(self, messages: list[dict[str, Any]], tool_schema: dict[str, Any]) -> BackendOutput:
+    def generate(self, messages: list[dict[str, Any]], tool_schemas: list[dict[str, Any]]) -> BackendOutput:
         response = create_response_with_retries(
             self.client,
             model=self.model,
             instructions=AGENT_SYSTEM_PROMPT,
-            tools=[tool_schema],
+            tools=tool_schemas,
             input=messages,
             max_output_tokens=self.max_output_tokens,
         )
@@ -151,12 +152,12 @@ class LlamaCppServerBackend(AgentBackend):
         self.enable_thinking = enable_thinking
         self.thinking_budget_tokens = thinking_budget_tokens
 
-    def generate(self, messages: list[dict[str, Any]], tool_schema: dict[str, Any]) -> BackendOutput:
+    def generate(self, messages: list[dict[str, Any]], tool_schemas: list[dict[str, Any]]) -> BackendOutput:
         response = create_chat_completion_with_retries(
             self.client,
             model=self.model,
             messages=[
-                {"role": "system", "content": self._system_prompt(tool_schema)},
+                {"role": "system", "content": self._system_prompt(tool_schemas)},
                 *messages,
             ],
             max_tokens=self.max_tokens,
@@ -176,11 +177,11 @@ class LlamaCppServerBackend(AgentBackend):
             token_usage=token_usage,
         )
 
-    def _system_prompt(self, tool_schema: dict[str, Any]) -> str:
-        schema_text = json_dumps(qwen_tool_schema(tool_schema))
+    def _system_prompt(self, tool_schemas: list[dict[str, Any]]) -> str:
+        schema_text = json_dumps(qwen_tool_schemas(tool_schemas))
         return (
             f"{AGENT_SYSTEM_PROMPT}\n\n"
-            "Tool schema for search_resources:\n"
+            "Tool schemas:\n"
             f"{schema_text}"
         )
 
@@ -189,17 +190,6 @@ class LlamaCppServerBackend(AgentBackend):
         if self.thinking_budget_tokens is not None:
             body["thinking_budget_tokens"] = int(self.thinking_budget_tokens)
         return body
-
-
-def qwen_tool_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": schema["name"],
-            "description": schema.get("description", ""),
-            "parameters": schema["parameters"],
-        },
-    }
 
 
 def backend_metadata(args) -> dict[str, Any]:

@@ -18,7 +18,7 @@ OPTIONAL_FIELD_PROBABILITY = {
 
 IGNORED_REQUIREMENTS = {"empty", "none", "varies", "unknown"}
 CASE_TYPES = ("single", "composite")
-PREFERENCE_PROFILES = ("strict", "flexible")
+CONSTRAINT_PROFILES = ("direct_match", "fallback_required")
 PREFERRED_CANDIDATE_SCAN_LIMIT = 200
 
 
@@ -42,7 +42,7 @@ def build_user_specs(
     while len(specs) < count and attempts < max_attempts:
         attempts += 1
         case_type = CASE_TYPES[len(specs) % len(CASE_TYPES)]
-        preference_profile = PREFERENCE_PROFILES[(len(specs) // len(CASE_TYPES)) % len(PREFERENCE_PROFILES)]
+        constraint_profile = CONSTRAINT_PROFILES[(len(specs) // len(CASE_TYPES)) % len(CONSTRAINT_PROFILES)]
         category = categories[category_index % len(categories)]
         category_index += 1
         resource = rng.choice(by_category[category])
@@ -51,7 +51,7 @@ def build_user_specs(
             category,
             rng,
             case_type=case_type,
-            preference_profile=preference_profile,
+            constraint_profile=constraint_profile,
             by_category=by_category,
             all_resources=resources,
         )
@@ -85,17 +85,17 @@ def make_user_spec(
     category: str,
     rng: random.Random,
     case_type: str = "single",
-    preference_profile: str = "strict",
+    constraint_profile: str = "direct_match",
     by_category: dict[str, list[Resource]] | None = None,
     all_resources: list[Resource] | None = None,
 ) -> dict | None:
     if case_type == "composite":
-        composite = make_composite_needs(resource, category, rng, preference_profile, by_category or {}, all_resources or [])
+        composite = make_composite_needs(resource, category, rng, constraint_profile, by_category or {}, all_resources or [])
         if composite is None:
             return None
         needs = composite
     else:
-        needs = [make_need(resource, category, rng, preference_profile, "need-1", all_resources or [])]
+        needs = [make_need(resource, category, rng, constraint_profile, "need-1", all_resources or [])]
     ground_truth_resources = [
         {
             "need_id": need["need_id"],
@@ -109,7 +109,7 @@ def make_user_spec(
         "user_spec_id": "",
         "case_id": "",
         "case_type": case_type,
-        "preference_profile": preference_profile,
+        "constraint_profile": constraint_profile,
         "source_resource_id": resource.resource_id,
         "source_resource_ids": [need["ground_truth_resource_id"] for need in needs],
         "needs": needs,
@@ -121,7 +121,7 @@ def make_composite_needs(
     resource: Resource,
     category: str,
     rng: random.Random,
-    preference_profile: str,
+    constraint_profile: str,
     by_category: dict[str, list[Resource]],
     all_resources: list[Resource],
 ) -> list[dict] | None:
@@ -135,19 +135,19 @@ def make_composite_needs(
     if not resource.schedule_windows or not second_resource.schedule_windows:
         return None
     needs = [
-        make_need(resource, category, rng, "strict", "need-1", all_resources, shared_context=shared_context, require_schedule=True),
+        make_need(resource, category, rng, "direct_match", "need-1", all_resources, shared_context=shared_context, require_schedule=True),
         make_need(
             second_resource,
             second_category,
             rng,
-            "strict",
+            "direct_match",
             "need-2",
             all_resources,
             shared_context=shared_context,
             require_schedule=True,
         ),
     ]
-    if preference_profile == "flexible":
+    if constraint_profile == "fallback_required":
         add_composite_preferred_constraints(needs, all_resources, rng)
     return needs
 
@@ -156,7 +156,7 @@ def make_need(
     resource: Resource,
     category: str,
     rng: random.Random,
-    preference_profile: str,
+    constraint_profile: str,
     need_id: str,
     all_resources: list[Resource],
     shared_context: dict | None = None,
@@ -187,7 +187,7 @@ def make_need(
         "available_documents": available_documents,
         "eligibility": eligibility,
     }
-    if preference_profile == "flexible":
+    if constraint_profile == "fallback_required":
         preferred = sample_unavailable_preferred_constraints(need, resource, all_resources, rng)
         if preferred is None:
             return need
@@ -204,7 +204,7 @@ def source_resources_visible(index: ResourceIndex, spec: dict, limit: int = 10) 
             result.resource.resource_id
             for result in search_resources(index, request_from_tool_args(expected_tool_args_for_need(need)), limit=limit)
         ]
-        if source_id not in result_ids:
+        if result_ids != [source_id]:
             return False
         preferred = need.get("preferred")
         if preferred:

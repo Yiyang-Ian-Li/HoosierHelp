@@ -20,25 +20,29 @@ from eval.llm_user import (
     LLMSimulatedUser,
 )
 from eval.spec_generation import build_user_specs
-from eval.tool_call_backends import (
+from eval.agent_backends import (
     DEFAULT_AGENT_ENABLE_THINKING,
     DEFAULT_AGENT_GENERATION_TOKEN_LIMIT,
     DEFAULT_AGENT_THINKING_BUDGET_TOKENS,
     backend_metadata,
     make_backend,
 )
-from eval.tool_call_parsers import clean_tool_call_text
-from eval.tool_call_schema import (
+from eval.tool_parsing import clean_tool_call_text
+from eval.scoring import (
     normalize_tool_args,
-    parse_selected_resource_ids,
-    score_resource_selection_by_need,
+    score_resource_selection,
     score_tool_calls,
+)
+from tools.tool_protocol import (
+    FINAL_RECOMMENDATION_TOOL_NAME,
+    SEARCH_RESOURCES_TOOL_NAME,
+    agent_tool_schemas,
+    normalize_final_recommendation_args,
 )
 from tools.indiana211 import (
     DEFAULT_RESULT_LIMIT,
     execute_search_resources,
     load_resource_index,
-    search_resources_tool_schema,
 )
 
 
@@ -83,14 +87,14 @@ def run(config: EvalConfig) -> Path:
     config.output_dir = resolve_output_dir(config)
     resource_index = load_resource_index(config.resources)
     specs = load_or_generate_specs(config, resource_index)
-    tool_schema = search_resources_tool_schema(resource_index)
+    tool_schemas = agent_tool_schemas(resource_index)
     expanded = expand_specs(specs, selected_user_behaviors(config))
     config.output_dir.mkdir(parents=True, exist_ok=True)
     write_json(config.output_dir / "args.json", serializable_run_config(config))
     write_json(config.output_dir / "generated_specs.json", specs)
     records_path = config.output_dir / "records.jsonl"
     records_path.write_text("", encoding="utf-8")
-    records = evaluate_all(expanded, tool_schema, resource_index, config, records_path)
+    records = evaluate_all(expanded, tool_schemas, resource_index, config, records_path)
     summary = summarize(records)
     write_json(config.output_dir / "summary.json", summary)
     print(json.dumps(summary, indent=2, ensure_ascii=False))
@@ -99,7 +103,7 @@ def run(config: EvalConfig) -> Path:
 
 def evaluate_all(
     expanded: list[tuple[dict[str, Any], str]],
-    tool_schema: dict[str, Any],
+    tool_schemas: list[dict[str, Any]],
     resource_index,
     config: EvalConfig,
     records_path: Path,
@@ -110,18 +114,18 @@ def evaluate_all(
     if config.backend == "local" or config.jobs == 1:
         backend = make_backend(config)
         with records_path.open("a", encoding="utf-8") as handle:
-            for spec, user_behavior in tqdm(expanded, desc="tool-call eval"):
-                record = evaluate_conversation(spec, user_behavior, tool_schema, resource_index, backend, config)
+            for spec, user_behavior in tqdm(expanded, desc="eval"):
+                record = evaluate_conversation(spec, user_behavior, tool_schemas, resource_index, backend, config)
                 records.append(record)
                 write_jsonl_row(handle, record)
         return records
     with ThreadPoolExecutor(max_workers=config.jobs) as executor:
         futures = {
-            executor.submit(evaluate_conversation, spec, user_behavior, tool_schema, resource_index, make_backend(config), config): (spec, user_behavior)
+            executor.submit(evaluate_conversation, spec, user_behavior, tool_schemas, resource_index, make_backend(config), config): (spec, user_behavior)
             for spec, user_behavior in expanded
         }
         with records_path.open("a", encoding="utf-8") as handle:
-            for future in tqdm(as_completed(futures), total=len(futures), desc="tool-call eval"):
+            for future in tqdm(as_completed(futures), total=len(futures), desc="eval"):
                 record = future.result()
                 records.append(record)
                 write_jsonl_row(handle, record)
@@ -132,7 +136,7 @@ def evaluate_all(
 def evaluate_conversation(
     spec: dict[str, Any],
     user_behavior: str,
-    tool_schema: dict[str, Any],
+    tool_schemas: list[dict[str, Any]],
     resource_index,
     backend,
     config: EvalConfig,
@@ -155,23 +159,37 @@ def evaluate_conversation(
     parse_modes = []
     executed_tool_results = []
     final_text = ""
+    final_action: dict[str, Any] | None = None
+    final_action_resource_ids: list[str] = []
+    final_action_parse_mode = "none"
+    termination_reason = "max_agent_turns"
     token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     runtime_errors: list[dict[str, str]] = []
     first_turn_tool_call = False
 
     for turn_index in range(config.max_agent_turns):
         try:
-            output = backend.generate(messages, tool_schema)
+            output = backend.generate(messages, tool_schemas)
         except RuntimeError as exc:
             runtime_errors.append({"stage": "agent_generate", "error": str(exc)})
+            termination_reason = "runtime_error"
             break
         raw_agent_outputs.append(output.text)
         add_token_usage(token_usage, output.token_usage or {})
-        if turn_index == 0 and output.tool_calls:
+        if turn_index == 0 and any(tool_call.name == SEARCH_RESOURCES_TOOL_NAME for tool_call in output.tool_calls):
             first_turn_tool_call = True
         if output.tool_calls:
             messages.append({"role": "assistant", "content": assistant_tool_call_message(output.tool_calls)})
             for tool_call in output.tool_calls:
+                if tool_call.name == FINAL_RECOMMENDATION_TOOL_NAME:
+                    final_action = normalize_final_recommendation_args(tool_call.arguments)
+                    final_text = final_action["message"]
+                    final_action_resource_ids = final_action["resource_ids"]
+                    final_action_parse_mode = tool_call.parse_mode
+                    termination_reason = "explicit_final_tool"
+                    break
+                if tool_call.name != SEARCH_RESOURCES_TOOL_NAME:
+                    continue
                 predicted_tool_calls.append(tool_call.arguments)
                 parse_modes.append(tool_call.parse_mode)
                 result = execute_search_resources(resource_index, tool_call.arguments, limit=config.tool_result_limit)
@@ -189,56 +207,48 @@ def evaluate_conversation(
                         "content": tool_result_message(call_index, result),
                     }
                 )
-            continue
-        if predicted_tool_calls:
-            final_text = clean_tool_call_text(output.text)
-            messages.append({"role": "assistant", "content": final_text})
-            if not final_text:
+            if final_action is not None:
                 break
-            if last_tool_result_empty(executed_tool_results):
-                try:
-                    user_reply = user.respond(messages, final_text)
-                except RuntimeError as exc:
-                    runtime_errors.append({"stage": "user_respond", "error": str(exc)})
-                    break
-                if user_reply:
-                    messages.append({"role": "user", "content": user_reply})
-                    continue
-            break
-        if contains_tool_call_syntax(output.text):
-            messages.append({"role": "assistant", "content": "[invalid tool call omitted from transcript]"})
-            break
+            continue
         assistant_text = clean_tool_call_text(output.text)
+        if contains_tool_call_syntax(output.text):
+            assistant_text = "[invalid tool call omitted from transcript]"
         messages.append({"role": "assistant", "content": assistant_text})
-        if not assistant_text:
-            break
         try:
             user_reply = user.respond(messages, assistant_text)
         except RuntimeError as exc:
             runtime_errors.append({"stage": "user_respond", "error": str(exc)})
+            termination_reason = "runtime_error"
             break
-        if not user_reply:
-            break
-        messages.append({"role": "user", "content": user_reply})
+        messages.append({"role": "user", "content": user_reply or ""})
 
     expected = expected_tool_calls(spec)
     expected_resource_ids = expected_resource_ids_from_spec(spec)
     valid_resource_ids_by_need = valid_resource_ids_for_expected_calls(resource_index, expected, config.tool_result_limit)
     predicted_resource_ids = normalize_selected_resource_ids(
-        parse_selected_resource_ids(final_text),
+        final_action_resource_ids,
         executed_tool_results,
     )
-    preference_profile = spec.get("preference_profile") or "strict"
-    scored_tool_calls = tool_calls_for_scoring(predicted_tool_calls, executed_tool_results, preference_profile)
+    constraint_profile = spec.get("constraint_profile") or "direct_match"
+    scored_tool_calls = tool_calls_for_scoring(predicted_tool_calls, executed_tool_results, constraint_profile)
     tool_score = score_tool_calls(scored_tool_calls, expected)
-    resource_score = score_resource_selection_by_need(predicted_resource_ids, valid_resource_ids_by_need)
+    resource_score = {
+        **score_resource_selection(predicted_resource_ids, expected_resource_ids),
+        "valid_resource_ids_by_need": valid_resource_ids_by_need,
+        "invalid_resource_ids": [
+            resource_id
+            for resource_id in predicted_resource_ids
+            if resource_id not in set(expected_resource_ids)
+        ],
+    }
     premature_tool_call = first_turn_tool_call and expected_has_nonservice_constraints(expected)
     score = {
         **tool_score,
         **resource_score,
+        "explicit_final_action": final_action is not None,
         "first_turn_tool_call": first_turn_tool_call,
         "premature_tool_call": premature_tool_call,
-        "end_to_end_match": bool(tool_score["all_match"]) and bool(resource_score["resource_exact_match"]),
+        "end_to_end_match": bool(final_action is not None) and bool(tool_score["all_match"]) and bool(resource_score["resource_exact_match"]),
     }
     return {
         "user_spec_id": user_spec_id(spec),
@@ -246,7 +256,7 @@ def evaluate_conversation(
         "user_behavior": user_behavior,
         "backend": backend_metadata(config),
         "case_type": spec.get("case_type") or ("composite" if len(spec.get("needs") or []) > 1 else "single"),
-        "preference_profile": preference_profile,
+        "constraint_profile": constraint_profile,
         "expected_tool_calls": expected,
         "predicted_tool_calls": [normalize_tool_args(call) for call in predicted_tool_calls],
         "scored_tool_calls": [normalize_tool_args(call) for call in scored_tool_calls],
@@ -254,6 +264,9 @@ def evaluate_conversation(
         "valid_resource_ids_by_need": valid_resource_ids_by_need,
         "predicted_resource_ids": predicted_resource_ids,
         "final_text": final_text,
+        "final_action": final_action_record(final_action),
+        "final_action_parse_mode": final_action_parse_mode,
+        "termination_reason": termination_reason,
         "executed_tool_results": executed_tool_results,
         "parse_mode": parse_modes[0] if parse_modes else "none",
         "parse_modes": parse_modes,
@@ -289,20 +302,33 @@ def tool_result_message(call_index: int, result: dict[str, Any]) -> str:
     return (
         f"Tool result for search_resources call {call_index}:\n"
         f"{json.dumps(result, ensure_ascii=False)}\n"
-        "Now choose the best returned resource_id or resource_ids for the original user. "
+        "Now choose the best returned resource_id or resource_ids for the original user by calling "
+        "the final_recommendation tool. "
         "Do not call search_resources again unless the user has provided new constraints."
     )
 
 
 def assistant_tool_call_message(tool_calls: list[Any]) -> str:
-    blocks = [
-        {
-            "name": "search_resources",
-            "arguments": compact_tool_args_for_context(getattr(tool_call, "arguments", {}) or {}),
-        }
-        for tool_call in tool_calls
-    ]
+    blocks = []
+    for tool_call in tool_calls:
+        name = getattr(tool_call, "name", "")
+        arguments = getattr(tool_call, "arguments", {}) or {}
+        if name == SEARCH_RESOURCES_TOOL_NAME:
+            arguments = compact_tool_args_for_context(arguments)
+        elif name == FINAL_RECOMMENDATION_TOOL_NAME:
+            arguments = normalize_final_recommendation_args(arguments)
+        blocks.append({"name": name, "arguments": arguments})
     return "\n".join(f"<tool_call> {json.dumps(block, ensure_ascii=False)} </tool_call>" for block in blocks)
+
+
+def final_action_record(final_action: dict[str, Any] | None) -> dict[str, Any] | None:
+    if final_action is None:
+        return None
+    return {
+        "name": FINAL_RECOMMENDATION_TOOL_NAME,
+        "resource_ids": list(final_action.get("resource_ids") or []),
+        "message": final_action.get("message") or "",
+    }
 
 
 def contains_tool_call_syntax(text: str) -> bool:
@@ -318,18 +344,12 @@ def compact_tool_args_for_context(args: dict[str, Any], max_items: int = 8) -> d
     return compact
 
 
-def last_tool_result_empty(executed_tool_results: list[dict[str, Any]]) -> bool:
-    if not executed_tool_results:
-        return False
-    return not (executed_tool_results[-1].get("result") or {}).get("resources")
-
-
 def tool_calls_for_scoring(
     predicted_tool_calls: list[dict[str, Any]],
     executed_tool_results: list[dict[str, Any]],
-    preference_profile: str,
+    constraint_profile: str,
 ) -> list[dict[str, Any]]:
-    if preference_profile != "flexible":
+    if constraint_profile != "fallback_required":
         return predicted_tool_calls
     return [
         item.get("arguments") or {}
@@ -424,6 +444,7 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
     keys = [
         "valid_tool_call",
         "tool_call_count_match",
+        "explicit_final_action",
         "first_turn_tool_call",
         "premature_tool_call",
         "service_match",
@@ -437,9 +458,10 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
         "end_to_end_match",
     ]
     parse_modes = Counter(record["parse_mode"] for record in records)
+    termination_reasons = Counter(record.get("termination_reason") or "unknown" for record in records)
     user_behaviors = sorted({record["user_behavior"] for record in records})
     case_types = sorted({record.get("case_type") for record in records})
-    preference_profiles = sorted({record.get("preference_profile") for record in records})
+    constraint_profiles = sorted({record.get("constraint_profile") for record in records})
     return {
         "cases": len(records),
         "overall": aggregate_records(records, keys),
@@ -451,26 +473,27 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
             case_type: aggregate_records([record for record in records if record.get("case_type") == case_type], keys)
             for case_type in case_types
         },
-        "by_preference_profile": {
-            profile: aggregate_records([record for record in records if record.get("preference_profile") == profile], keys)
-            for profile in preference_profiles
+        "by_constraint_profile": {
+            profile: aggregate_records([record for record in records if record.get("constraint_profile") == profile], keys)
+            for profile in constraint_profiles
         },
-        "by_case_type_preference_behavior": {
+        "by_case_type_constraint_behavior": {
             f"{case_type}__{profile}__{behavior}": aggregate_records(
                 [
                     record
                     for record in records
                     if record.get("case_type") == case_type
-                    and record.get("preference_profile") == profile
+                    and record.get("constraint_profile") == profile
                     and record.get("user_behavior") == behavior
                 ],
                 keys,
             )
             for case_type in case_types
-            for profile in preference_profiles
+            for profile in constraint_profiles
             for behavior in user_behaviors
         },
         "parse_modes": dict(sorted(parse_modes.items())),
+        "termination_reasons": dict(sorted(termination_reasons.items())),
         "parse_none_rate": parse_modes.get("none", 0) / len(records) if records else 0.0,
         "score_by_parse_mode": {
             mode: aggregate_records([record for record in records if record["parse_mode"] == mode], keys)
@@ -627,7 +650,7 @@ def resolve_output_dir(config: EvalConfig) -> Path:
         budget = config.agent_thinking_budget_tokens
         thinking_name = f"think-{budget}" if budget is not None else "think-unlimited"
     run_name = "__".join([spec_name, slug(config.backend), model_name, adapter_name, behavior_name, thinking_name, timestamp])
-    return Path("experiments/tool_call_eval") / run_name
+    return Path("experiments") / run_name
 
 
 def slug(value: str) -> str:
