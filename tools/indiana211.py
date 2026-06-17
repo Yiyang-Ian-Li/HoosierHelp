@@ -327,6 +327,8 @@ def _schedule_object(value: object) -> dict:
     start = _parse_hhmm(value.get("start_time"))
     end = _parse_hhmm(value.get("end_time"))
     time = _parse_hhmm(value.get("time"))
+    if start == 0 and end == 1439 and time is None:
+        return {}
     result = {"day": day}
     if start is not None and end is not None and start == end:
         result["time"] = str(value.get("start_time"))

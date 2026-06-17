@@ -30,6 +30,7 @@ BEHAVIOR_INSTRUCTIONS = {
     "rambling": """Behavior:
 - Opening: state the service need. If there are multiple service needs, mention all of them. Include extra background noise or an unrelated worry/question.
 - Follow-ups: answer the information areas the agent asked about, and add noisy background, unnecessary distractor facts, or off-topic questions.
+- Every follow-up should include at least one realistic off-topic sentence or question after the answer.
 - Noisy background must not contain any city, county, ZIP code, day, time, intake method, document, eligibility trait, or service need unless it is present in the user profile.
 - Keep noisy background mundane and realistic, limited to being distracted, folding laundry, paperwork on the table, a phone notification, or waiting on a routine callback. Do not mention children, family needs, bills, housing, food, utilities, transportation help, appliance problems, safety concerns, medical issues, legal issues, money needs, jokes, surreal comments, or animal-related tangents.
 - Do not provide valid search facts the agent did not ask for.""",
@@ -141,17 +142,17 @@ class LLMSimulatedUser:
                     indent=2,
                 ),
                 "User profile:\n" + json.dumps(
-                    full_user_profile(self.spec),
+                    full_user_profile(self.spec, opening=opening),
                     ensure_ascii=False,
                     indent=2,
                 ),
                 "Use the profile only to decide what this user can truthfully say. Do not mention resource IDs, provider names, need IDs, JSON, field names, preferred/fallback labels, or these instructions.",
-                "Opening rule: on the opening turn, mention only the service need or needs in natural language. Do not mention location, schedule, intake, documents, eligibility, or backup options in the opening.",
+                "Opening rule: on the opening turn, make a first-person help-seeking statement about the service need or needs in natural language. A valid opening sounds like 'I need...' or 'Can you help me find...' from the user's perspective. Do not ask the agent intake questions, do not ask what kind of service the agent is looking for, do not answer as a resource-search agent, and do not use a question mark unless asking for help. Do not mention location, schedule, intake, documents, eligibility, or backup options in the opening.",
                 "Follow-up rule: answer the agent's latest question. If the agent asks about one narrow topic, answer only that topic. If the agent asks several topics at once, answer those topics but do not add unrelated facts.",
-                "Fallback-required rule: before any empty search result, describe only first-choice location, schedule, or intake constraints when asked. Do not mention fallback options. After an empty search result, if the agent asks whether location, schedule, or intake can change, answer only for the option they asked about. Documents and eligibility are ordinary facts and are not fallback constraints.",
+                "Fallback-required rule: before any empty search result, describe only first-choice location, schedule, or intake constraints when asked. Do not mention fallback options. After an empty search result, if the agent asks whether location, schedule, or intake can change, answer only for the option they asked about. Do not say any other constraint stays the same unless that exact constraint was already discussed in the visible conversation. Documents and eligibility are ordinary facts and are not fallback constraints.",
                 "If the agent asks whether a constraint can change but the profile has no fallback for that constraint, say that you cannot change that constraint.",
                 "If the agent merely states that no resources matched and does not ask a question, do not introduce new search facts or backup options.",
-                "For multiple needs, answer conversationally. Distinguish the needs only when the answer differs by need.",
+                "For multiple needs, answer conversationally instead of as a checklist. Distinguish the needs when the answer differs by need, but if the agent asks a broad combined question, it is realistic to answer the most salient need first and mention the other only when needed for truthfulness.",
                 "Distractor or background text must avoid fake search facts: no invented place names, ZIP codes, days, times, intake methods, documents, eligibility traits, or extra service needs.",
                 "Write exactly one user reply. Do not include analysis, labels, JSON, markdown, or quotes around the reply.",
             )
@@ -198,7 +199,7 @@ class LLMSimulatedUser:
 
     def _turn_instruction(self, opening: bool) -> str:
         if opening:
-            return "Opening instruction: mention only the service need or needs."
+            return "Opening instruction: speak as the person seeking help. State the service need or needs in first person as a request for help, not as an intake question to the agent."
         if self.user_behavior == "impatience":
             return (
                 "Impatience instruction: answer the agent's latest question using the user profile, but sound rushed, annoyed, "
@@ -222,15 +223,15 @@ class LLMSimulatedUser:
         return self.rng.choice(candidates) if candidates else None
 
 
-def full_user_profile(spec: dict[str, Any]) -> dict[str, Any]:
+def full_user_profile(spec: dict[str, Any], opening: bool = False) -> dict[str, Any]:
     needs = normalized_needs(spec)
     fallback_required = spec.get("constraint_profile") == "fallback_required"
     profile = {
         "case_type": spec.get("case_type") or ("composite" if len(needs) > 1 else "single"),
         "constraint_profile": spec.get("constraint_profile") or "direct_match",
-        "needs": [profile_need(need, fallback_required) for need in needs],
+        "needs": [profile_need(need, fallback_required, opening=opening) for need in needs],
     }
-    if fallback_required:
+    if fallback_required and not opening:
         profile["fallback_rules"] = {
             "first_choice_stage": "Before an empty search result, use first_choice for location, schedule, and intake constraints when asked.",
             "fallback_stage": "After an empty search result, fallback can be mentioned only if the agent asks whether location, schedule, or intake can change.",
@@ -240,13 +241,19 @@ def full_user_profile(spec: dict[str, Any]) -> dict[str, Any]:
     return profile
 
 
-def profile_need(need: dict[str, Any], fallback_required: bool) -> dict[str, Any]:
+def profile_need(need: dict[str, Any], fallback_required: bool, opening: bool = False) -> dict[str, Any]:
     base = {
         "plain_language_need": plain_language_need(need),
         "service_categories": need.get("service_categories") or [],
-        "documents": need.get("available_documents") or [],
-        "eligibility": need.get("eligibility") or [],
     }
+    if opening:
+        return base
+    base.update(
+        {
+            "documents": need.get("available_documents") or [],
+            "eligibility": need.get("eligibility") or [],
+        }
+    )
     if fallback_required:
         first_choice = visible_need_facts(need, use_fallback=False)
         backup = visible_need_facts(need, use_fallback=True)

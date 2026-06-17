@@ -6,7 +6,7 @@ from typing import Any
 
 from agent.llm import create_chat_completion_with_retries, create_response_with_retries, make_openai_client
 from eval.tool_parsing import ParsedToolCall, parse_qwen_xml_tool_calls, parse_responses_tool_calls
-from eval.agent_prompt import AGENT_SYSTEM_PROMPT
+from eval.agent_prompt import AGENT_SYSTEM_PROMPT, RESPONSES_AGENT_SYSTEM_PROMPT
 from tools.tool_protocol import qwen_tool_schemas
 
 
@@ -119,7 +119,7 @@ class ResponsesAPIBackend(AgentBackend):
         response = create_response_with_retries(
             self.client,
             model=self.model,
-            instructions=AGENT_SYSTEM_PROMPT,
+            instructions=RESPONSES_AGENT_SYSTEM_PROMPT,
             tools=tool_schemas,
             input=messages,
             max_output_tokens=self.max_output_tokens,
@@ -128,9 +128,12 @@ class ResponsesAPIBackend(AgentBackend):
         add_response_usage(token_usage, response)
         text = getattr(response, "output_text", "") or ""
         raw = response.model_dump(mode="json") if hasattr(response, "model_dump") else None
+        tool_calls = parse_responses_tool_calls(response)
+        if "<tool_call" in text:
+            tool_calls.extend(parse_qwen_xml_tool_calls(text))
         return BackendOutput(
             text=text,
-            tool_calls=parse_responses_tool_calls(response),
+            tool_calls=tool_calls,
             raw=raw,
             token_usage=token_usage,
         )

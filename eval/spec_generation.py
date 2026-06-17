@@ -9,11 +9,11 @@ from tools.indiana211_schedule import ScheduleWindow, format_minutes, is_24_hour
 
 
 OPTIONAL_FIELD_PROBABILITY = {
-    "schedule": 0.70,
+    "schedule": 0.65,
     "location": 1.00,
-    "intake_methods": 0.55,
-    "available_documents": 0.45,
-    "eligibility": 0.45,
+    "intake_methods": 0.35,
+    "available_documents": 0.25,
+    "eligibility": 0.25,
 }
 
 IGNORED_REQUIREMENTS = {"empty", "none", "varies", "unknown"}

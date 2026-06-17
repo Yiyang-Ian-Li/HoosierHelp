@@ -52,6 +52,8 @@ def normalize_schedule(schedule: dict[str, Any]) -> dict[str, Any]:
         time = _clean(schedule.get("time"))
         if not (start_time and end_time):
             start_time, end_time = _time_range(schedule.get("time"))
+        if start_time == "00:00" and end_time == "23:59" and not time:
+            return {}
         if start_time and end_time and start_time == end_time:
             result["time"] = start_time
         elif start_time and end_time:
